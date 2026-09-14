@@ -296,6 +296,7 @@ type requestMeta struct {
 	Anonymous     bool
 	Proxy         string
 	Attempts      int
+	Legs          []string
 	Stream        bool
 	Usage         bridgeUsage
 	UsageReported bool
@@ -954,7 +955,7 @@ func monitorMiddleware(monitor *Monitor, logger *slog.Logger, next http.Handler)
 				logger.Info("request routed", "component", "http", "event", "request_routed", "method", r.Method,
 					"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "request_id", meta.Request,
 					"model", meta.Model, "tier", meta.Tier, "key_id", meta.KeyID, "channel", meta.Channel,
-					"anonymous", meta.Anonymous, "attempts", meta.Attempts, "stream", meta.Stream)
+					"anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream)
 			}
 			logger.Debug("request completed", "component", "http", "event", "request_complete", "method", r.Method,
 				"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "bytes", writer.bytes,

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -427,6 +428,15 @@ func (g *Gateway) doUpstream(ctx context.Context, route modelRoute, bodies map[T
 	// Restore the body so downstream error handling still sees the original
 	// payload when no retry happens below.
 	resp.Body = io.NopCloser(bytes.NewReader(errBody))
+	// ponytail: capped upstream-error snippet. Bodies never enter the ledger;
+	// the hub redactor scrubs keys. Names the 400 class instantly.
+	if len(errBody) > 0 {
+		snippet := string(errBody)
+		if len(snippet) > 240 {
+			snippet = snippet[:240]
+		}
+		g.logger.Info("upstream error returned or retried", "component", "upstream", "event", "upstream_error_body", "request_id", ids.Request, "model", route.ID, "status", resp.StatusCode, "snippet", snippet)
+	}
 	if !isStaleReasoningReference(errBody) {
 		return resp, effectiveRoute, nil
 	}
@@ -624,6 +634,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bod
 		}
 		g.syncProxyResult(ctx, node.proxy, status, err)
 		g.recordUpstreamAttempt(route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, node.proxy, resp, err, duration)
+		appendLeg(ctx, "anon:"+legToken("anon", resp, err, duration))
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.anonymous.MarkSuccess(node)
 			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", redactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
@@ -706,6 +717,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route modelRoute, bodies ma
 		}
 		proxyFailed := g.syncProxyResult(ctx, proxy, status, err)
 		g.recordUpstreamAttempt(route, ids, attemptOffset+attempts, keyID, "key", false, proxy, resp, err, attemptDuration)
+		appendLeg(ctx, legToken(keyID, resp, err, attemptDuration))
 		if err == nil && resp.StatusCode/100 == 2 {
 			nodes.MarkSuccess(node)
 			g.logger.Debug("upstream accepted request", "component", "upstream", "event", "attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", redactURL(proxy.name), "status", resp.StatusCode, "duration_ms", attemptDuration.Milliseconds())
@@ -777,6 +789,28 @@ func extractResponseUsage(protocol Protocol, body []byte) (bridgeUsage, bool) {
 		return decodeAnthropicUsage(usage), true
 	}
 	return decodeOpenAIUsage(usage), true
+}
+
+// legToken compacts one upstream attempt for the per-request ledger:
+// key:status:ms, with transport errors bucketed (no raw error strings).
+func legToken(keyID string, resp *http.Response, err error, duration time.Duration) string {
+	outcome := "transport"
+	if resp != nil {
+		outcome = strconv.Itoa(resp.StatusCode)
+	} else if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			outcome = "timeout"
+		} else if errors.Is(err, context.Canceled) {
+			outcome = "canceled"
+		}
+	}
+	return keyID + ":" + outcome + ":" + strconv.FormatInt(max(duration.Milliseconds(), 0), 10) + "ms"
+}
+
+func appendLeg(ctx context.Context, token string) {
+	if meta, _ := ctx.Value(requestMetaKey{}).(*requestMeta); meta != nil {
+		meta.Legs = append(meta.Legs, token)
+	}
 }
 
 func (g *Gateway) recordUpstreamAttempt(route modelRoute, ids requestIDs, attempt int, keyID, channel string, anonymous bool, proxy *proxyTransport, resp *http.Response, err error, duration time.Duration) {
