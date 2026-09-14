@@ -437,8 +437,12 @@ func (g *Gateway) doUpstream(ctx context.Context, route modelRoute, bodies map[T
 	// them under a fresh upstream session instead of failing the client
 	// request outright. Attempt numbering continues from the first round so
 	// monitoring never shows duplicate attempt numbers for one request.
+	// ponytail: preserve the stable session across the retry. The stripped
+	// payload is ref-free, so its response is branded with this session and
+	// the next turn's references still match. Minting a fresh random session
+	// poisoned every later turn (its refs never match the stable session,
+	// so each turn 400s and retries again: ~2x latency on every request).
 	retryIDs := ids
-	retryIDs.Session = randomID("ses", 12)
 	g.logger.Info("retrying upstream without stale reasoning references", "component", "upstream", "event", "reasoning_reference_retry", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "attempt_offset", attempts)
 	retryResp, retryRoute, _, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, retryIDs, attempts)
 	if retryErr != nil || retryResp == nil || retryResp.StatusCode/100 != 2 {

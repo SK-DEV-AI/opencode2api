@@ -763,6 +763,14 @@ func encodeResponsesRequest(request bridgeRequest) map[string]any {
 			switch block.Kind {
 			case "reasoning":
 				flushContent()
+				if block.ID == "" {
+					// ponytail: id-less history reasoning (chat clients echo
+					// text without the upstream rs_ id). A minted random id
+					// is unknown server-side, so it 400s + retries every
+					// turn; the served reply already comes from the stripped
+					// retry, so skip here and succeed first-attempt identical.
+					continue
+				}
 				items = append(items, encodeResponsesReasoning(block, false))
 			case "text":
 				kind := "input_text"
