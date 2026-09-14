@@ -581,6 +581,12 @@ func (parser *bridgeStreamParser) parseResponses(eventName string, value map[str
 		stop := "stop"
 		if typeName == "response.incomplete" {
 			stop = canonicalResponsesIncomplete(stringAt(response, "incomplete_details", "reason"))
+		} else if responsesOutputHasToolCalls(response) {
+			// ponytail: completed tool-bearing turns must finish as
+			// tool_calls (upstream sends no reason). Stamping stop ends
+			// the downstream turn per tool step: badge spam + new full-
+			// history request per step instead of in-turn chaining.
+			stop = "tool_calls"
 		}
 		events := make([]bridgeStreamEvent, 0, 3)
 		if len(usageMap) > 0 {
@@ -590,6 +596,16 @@ func (parser *bridgeStreamParser) parseResponses(eventName string, value map[str
 		return append(events, bridgeStreamEvent{Kind: "finish", Stop: stop}, bridgeStreamEvent{Kind: "done"})
 	}
 	return nil
+}
+
+func responsesOutputHasToolCalls(response map[string]any) bool {
+	for _, raw := range asSlice(response["output"]) {
+		item, _ := raw.(map[string]any)
+		if stringAt(item, "type") == "function_call" {
+			return true
+		}
+	}
+	return false
 }
 
 func streamErrorMessage(value map[string]any, fallback string) string {
