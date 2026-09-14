@@ -108,6 +108,18 @@ func transcodeStreamWithUsageContext(ctx context.Context, w http.ResponseWriter,
 		if errors.Is(readErr, errStreamNormalTermination) || errors.Is(readErr, errStreamUpstreamFailure) {
 			return emitter.usage, emitter.usageReported, nil
 		}
+		// ponytail: mid-stream reset AFTER partial content already went
+		// downstream. Header-phase failures never reach here (attempt loop
+		// retries them). Killing the turn now strands the partial reply
+		// and forces a manual continue. A length finish keeps the partial
+		// text and lets the client continue from it instead.
+		if termination == streamOpen && (emitter.text.Len() > 0 || len(emitter.order) > 0) {
+			emitter.stop = "length"
+			if finishErr := emitter.Finish(); finishErr != nil {
+				return emitter.usage, emitter.usageReported, finishErr
+			}
+			return emitter.usage, emitter.usageReported, nil
+		}
 		if streamClientCancelled(ctx, readErr) {
 			return emitter.usage, emitter.usageReported, readErr
 		}
