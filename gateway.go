@@ -72,7 +72,9 @@ type healthProxies struct {
 }
 
 func NewGateway(cfg Config, logger *slog.Logger, monitor *Monitor) (*Gateway, error) {
-	transports, err := newTransportPool(cfg.RuntimeProxies(), cfg.Performance, time.Duration(cfg.Retry.TimeoutSeconds)*time.Second)
+	// ponytail: header wait is per-attempt, not per-request. sharing the
+	// request budget here let one sick attempt starve the whole turn.
+	transports, err := newTransportPool(cfg.RuntimeProxies(), cfg.Performance, time.Duration(cfg.Performance.AttemptTimeoutSeconds)*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -590,6 +592,11 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route modelRoute, bod
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
 	for attempts < limit {
+		// ponytail: never fire phantom attempts on an expired budget;
+		// each one cooled a healthy node for nothing.
+		if ctx.Err() != nil {
+			break
+		}
 		node := cursor.Next()
 		if node == nil {
 			break
@@ -659,6 +666,11 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route modelRoute, bodies ma
 		return nil, fmt.Errorf("no prepared %s request body", route.Tier), 0
 	}
 	for attempts < g.cfg.Retry.MaxAttempts {
+		// ponytail: never fire phantom attempts on an expired budget;
+		// each one cooled a healthy node for nothing.
+		if ctx.Err() != nil {
+			break
+		}
 		node := cursor.Next()
 		if node == nil {
 			break

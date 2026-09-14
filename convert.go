@@ -66,6 +66,14 @@ type bridgeRequest struct {
 	Stop        any
 	Reasoning   any
 	Metadata    any
+	// ponytail: faithful passthrough. Chat-originated sampling/response
+	// knobs the translator used to drop silently; targets that lack a
+	// native shape omit them (see encoders), never fail.
+	ResponseFormat    any
+	ParallelToolCalls any
+	FrequencyPenalty  any
+	PresencePenalty   any
+	Seed              any
 }
 
 type bridgeUsage struct {
@@ -293,6 +301,11 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		request.MaxTokens = firstAny(input["max_completion_tokens"], input["max_tokens"])
 		request.Stop = input["stop"]
 		request.Reasoning = firstAny(input["reasoning_effort"], input["reasoning"])
+		request.ResponseFormat = input["response_format"]
+		request.ParallelToolCalls = input["parallel_tool_calls"]
+		request.FrequencyPenalty = input["frequency_penalty"]
+		request.PresencePenalty = input["presence_penalty"]
+		request.Seed = input["seed"]
 		for i, raw := range sliceAt(input, "messages") {
 			message, ok := raw.(map[string]any)
 			if !ok {
@@ -354,6 +367,9 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 	case ProtocolResponses:
 		request.MaxTokens = input["max_output_tokens"]
 		request.Stop = input["stop"]
+		if text, ok := input["text"].(map[string]any); ok {
+			request.ResponseFormat = text["format"]
+		}
 		request.Reasoning = firstAny(input["reasoning"], input["reasoning_effort"])
 		instructions, err := decodeOpenAIBlocksChecked(input["instructions"])
 		if err != nil {
@@ -550,6 +566,11 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	put(output, "top_p", request.TopP)
 	put(output, "max_tokens", request.MaxTokens)
 	put(output, "stop", request.Stop)
+	put(output, "response_format", request.ResponseFormat)
+	put(output, "parallel_tool_calls", request.ParallelToolCalls)
+	put(output, "frequency_penalty", request.FrequencyPenalty)
+	put(output, "presence_penalty", request.PresencePenalty)
+	put(output, "seed", request.Seed)
 	if effort := reasoningEffort(request.Reasoning); effort != nil {
 		output["reasoning_effort"] = effort
 	}
@@ -720,6 +741,29 @@ func missingToolIDs(order []string, pending map[string]bool) []string {
 	return missing
 }
 
+// responsesTextFormat maps a chat-style response_format to the Responses
+// text.format shape (flat, not nested under a json_schema key). Returns nil
+// when unmappable so the encoder omits it: no JSON mode, same as before,
+// never a failure.
+func responsesTextFormat(rf any) any {
+	m, _ := rf.(map[string]any)
+	if m == nil {
+		return nil
+	}
+	switch stringAt(m, "type") {
+	case "json_object":
+		return map[string]any{"type": "json_object"}
+	case "json_schema":
+		inner := mapAt(m, "json_schema")
+		format := map[string]any{"type": "json_schema"}
+		put(format, "name", firstString(stringAt(inner, "name"), "response"))
+		put(format, "schema", inner["schema"])
+		put(format, "strict", inner["strict"])
+		return format
+	}
+	return nil
+}
+
 func encodeResponsesRequest(request bridgeRequest) map[string]any {
 	output := map[string]any{"model": request.Model, "stream": request.Stream}
 	put(output, "temperature", request.Temperature)
@@ -727,6 +771,13 @@ func encodeResponsesRequest(request bridgeRequest) map[string]any {
 	put(output, "max_output_tokens", request.MaxTokens)
 	put(output, "stop", request.Stop)
 	put(output, "metadata", request.Metadata)
+	if format := responsesTextFormat(request.ResponseFormat); format != nil {
+		output["text"] = map[string]any{"format": format}
+	}
+	put(output, "parallel_tool_calls", request.ParallelToolCalls)
+	put(output, "frequency_penalty", request.FrequencyPenalty)
+	put(output, "presence_penalty", request.PresencePenalty)
+	put(output, "seed", request.Seed)
 	if len(request.System) > 0 {
 		output["instructions"] = bridgeBlocksText(request.System)
 	}
