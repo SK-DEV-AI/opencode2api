@@ -268,6 +268,10 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		request.FrequencyPenalty = input["frequency_penalty"]
 		request.PresencePenalty = input["presence_penalty"]
 		request.Seed = input["seed"]
+		request.PromptCacheKey = input["prompt_cache_key"]
+		request.SafetyIdentifier = input["safety_identifier"]
+		request.ServiceTier = input["service_tier"]
+		request.Store = input["store"]
 
 	case Responses:
 		request.MaxTokens = input["max_output_tokens"]
@@ -340,6 +344,10 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		request.ToolChoice = decodeResponsesToolChoice(input["tool_choice"])
 		request.ResponseFormat = jsonutil.MapAt(input, "text", "format")
 		request.ParallelToolCalls = input["parallel_tool_calls"]
+		request.PromptCacheKey = input["prompt_cache_key"]
+		request.SafetyIdentifier = input["safety_identifier"]
+		request.ServiceTier = input["service_tier"]
+		request.Store = input["store"]
 
 	case Anthropic:
 		request.MaxTokens = input["max_tokens"]
@@ -478,6 +486,10 @@ func encodeChatRequest(request bridgeRequest) (map[string]any, error) {
 	jsonutil.Put(output, "frequency_penalty", request.FrequencyPenalty)
 	jsonutil.Put(output, "presence_penalty", request.PresencePenalty)
 	jsonutil.Put(output, "seed", request.Seed)
+	jsonutil.Put(output, "prompt_cache_key", request.PromptCacheKey)
+	jsonutil.Put(output, "safety_identifier", request.SafetyIdentifier)
+	jsonutil.Put(output, "service_tier", request.ServiceTier)
+	jsonutil.Put(output, "store", request.Store)
 	if request.Stream {
 		output["stream_options"] = map[string]any{"include_usage": true}
 	}
@@ -667,6 +679,12 @@ func encodeResponsesRequest(request bridgeRequest) map[string]any {
 		output["text"] = map[string]any{"format": format}
 	}
 	jsonutil.Put(output, "parallel_tool_calls", request.ParallelToolCalls)
+	// ponytail: native-fidelity knobs. Omit-when-absent: clients that never
+	// send them see zero behavior change; opencode turns ride cache affinity.
+	jsonutil.Put(output, "prompt_cache_key", request.PromptCacheKey)
+	jsonutil.Put(output, "safety_identifier", request.SafetyIdentifier)
+	jsonutil.Put(output, "service_tier", request.ServiceTier)
+	jsonutil.Put(output, "store", request.Store)
 
 	items := make([]any, 0, len(request.Messages)+1)
 	if len(request.Developer) > 0 {
