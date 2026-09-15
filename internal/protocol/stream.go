@@ -56,6 +56,9 @@ func transcodeStreamWithUsage(w http.ResponseWriter, reader io.Reader, from, to 
 type StreamOutcome struct {
 	Stop string
 	Tail string
+	// Delivered is false when the stream died before anything reached
+	// downstream. The gateway uses it for the zero-delivery replay.
+	Delivered bool
 }
 
 // TranscodeStream is the request-aware form used by the
@@ -103,7 +106,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 	})
 	outcome := func() StreamOutcome {
 		stop := emitter.StopReason()
-		out := StreamOutcome{Stop: stop}
+		out := StreamOutcome{Stop: stop, Delivered: emitter.Delivered()}
 		if (stop == "length" || stop == "") && emitter.TextLen() > 0 {
 			out.Tail = emitter.TextTail(200)
 		}

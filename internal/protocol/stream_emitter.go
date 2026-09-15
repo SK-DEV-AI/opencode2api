@@ -644,6 +644,14 @@ func (emitter *bridgeStreamEmitter) rawSSE(eventName, data string) error {
 // "length", "tool_calls", "content_filter").
 func (emitter *bridgeStreamEmitter) StopReason() string { return emitter.stop }
 
+// Delivered reports whether anything reached downstream yet (text, reasoning
+// deltas, or tool calls). A stream that dies before delivery is safe to
+// replay wholesale: the client saw nothing, so a fresh attempt is
+// indistinguishable from a slow first attempt.
+func (emitter *bridgeStreamEmitter) Delivered() bool {
+	return emitter.text.Len() > 0 || len(emitter.order) > 0 || emitter.reasoning.Len() > 0 || emitter.reasoningSignature.Len() > 0
+}
+
 // SetStop overrides the terminal reason (mid-stream rescue path).
 func (emitter *bridgeStreamEmitter) SetStop(stop string) { emitter.stop = stop }
 

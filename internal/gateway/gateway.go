@@ -200,6 +200,32 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				if meta != nil {
 					meta.Stop, meta.Tail = outcome.Stop, outcome.Tail
 				}
+				// ponytail: zero-delivery reset replay. Upstream cut the
+				// stream before anything reached downstream (Cloudflare
+				// shed during the thinking phase). The client saw
+				// nothing, so one fresh attempt is indistinguishable
+				// from a slow first attempt. Exactly once, never on
+				// client-cancel, never after partial delivery.
+				if err != nil && !wire.ClientCanceled(r.Context(), err) && !outcome.Delivered {
+					resp.Body.Close()
+					g.logger.Info("replaying zero-delivery stream", "component", "stream", "event", "stream_zero_replay", "request_id", ids.Request, "model", model, "error", err)
+					retryResp, retryRoute, retryErr := g.doUpstream(requestCtx, route, bodies, ids)
+					if retryErr == nil && retryResp != nil && retryResp.StatusCode/100 == 2 {
+						defer retryResp.Body.Close()
+						upstreamRoute = retryRoute
+						usage, usageReported, outcome, err = wire.TranscodeStream(r.Context(), w, retryResp.Body, upstreamRoute.Protocol, external, model)
+						if meta != nil {
+							meta.Stop, meta.Tail = outcome.Stop, outcome.Tail
+							meta.Tier = string(upstreamRoute.Tier)
+							meta.Protocol = upstreamRoute.Protocol
+						}
+					} else if retryErr != nil {
+						g.logger.Warn("zero-delivery replay failed", "component", "stream", "event", "stream_zero_replay_failed", "request_id", ids.Request, "model", model, "error", retryErr)
+						if retryResp != nil {
+							retryResp.Body.Close()
+						}
+					}
+				}
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
