@@ -17,6 +17,11 @@ var errStreamNormalTermination = errors.New("upstream stream terminated normally
 
 var errSSEUnexpectedEOF = errors.New("unexpected end of SSE stream")
 
+// ErrZeroDeliveryReset signals a mid-stream upstream reset before anything
+// reached downstream. The error frame is deliberately NOT emitted: the
+// gateway replays the turn on a fresh attempt inside the same connection.
+var ErrZeroDeliveryReset = errors.New("upstream reset before delivery")
+
 type streamTermination uint8
 
 const (
@@ -59,6 +64,18 @@ type StreamOutcome struct {
 	// Delivered is false when the stream died before anything reached
 	// downstream. The gateway uses it for the zero-delivery replay.
 	Delivered bool
+}
+
+// EmitStreamError writes a terminal upstream-error frame for a caller that
+// took over a stream (e.g. after a failed zero-delivery replay). Headers
+// are already sent, so this is SSE framing, not an HTTP status.
+func EmitStreamError(w http.ResponseWriter, to Protocol, model string, cause error) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return fmt.Errorf("response writer does not support streaming")
+	}
+	emitter := newBridgeStreamEmitter(w, flusher, to, model)
+	return emitUnexpectedStreamError(emitter, cause)
 }
 
 // TranscodeStream is the request-aware form used by the
@@ -132,6 +149,14 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 			return emitter.usage, emitter.usageReported, outcome(), nil
 		}
 		if termination == streamOpen {
+			// ponytail: zero-delivery reset. Nothing reached downstream
+			// yet, so do NOT emit the error frame: the gateway replays
+			// the turn on a fresh attempt inside the same downstream
+			// connection. Emitting first would poison the stream and
+			// make the replay unreceivable.
+			if !emitter.Delivered() {
+				return emitter.usage, emitter.usageReported, outcome(), ErrZeroDeliveryReset
+			}
 			if emitErr := emitUnexpectedStreamError(emitter, readErr); emitErr != nil {
 				return emitter.usage, emitter.usageReported, outcome(), emitErr
 			}

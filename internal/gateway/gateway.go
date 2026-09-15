@@ -206,7 +206,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				// nothing, so one fresh attempt is indistinguishable
 				// from a slow first attempt. Exactly once, never on
 				// client-cancel, never after partial delivery.
-				if err != nil && !wire.ClientCanceled(r.Context(), err) && !outcome.Delivered {
+				if errors.Is(err, wire.ErrZeroDeliveryReset) && !wire.ClientCanceled(r.Context(), err) {
 					resp.Body.Close()
 					g.logger.Info("replaying zero-delivery stream", "component", "stream", "event", "stream_zero_replay", "request_id", ids.Request, "model", model, "error", err)
 					retryResp, retryRoute, retryErr := g.doUpstream(requestCtx, route, bodies, ids)
@@ -219,10 +219,18 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 							meta.Tier = string(upstreamRoute.Tier)
 							meta.Protocol = upstreamRoute.Protocol
 						}
-					} else if retryErr != nil {
-						g.logger.Warn("zero-delivery replay failed", "component", "stream", "event", "stream_zero_replay_failed", "request_id", ids.Request, "model", model, "error", retryErr)
+					} else {
+						// ponytail: replay failed or non-2xx. The first
+						// attempt's error frame was suppressed, so emit
+						// now: a clean error beats a client hang.
+						if retryErr != nil {
+							g.logger.Warn("zero-delivery replay failed", "component", "stream", "event", "stream_zero_replay_failed", "request_id", ids.Request, "model", model, "error", retryErr)
+						}
 						if retryResp != nil {
 							retryResp.Body.Close()
+						}
+						if emitErr := wire.EmitStreamError(w, external, model, err); emitErr != nil {
+							err = emitErr
 						}
 					}
 				}
