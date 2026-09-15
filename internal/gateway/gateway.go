@@ -195,7 +195,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			if external == upstreamRoute.Protocol {
 				usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
 			} else {
-				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
+				var outcome wire.StreamOutcome
+				usage, usageReported, outcome, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
+				if meta != nil {
+					meta.Stop, meta.Tail = outcome.Stop, outcome.Tail
+				}
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported

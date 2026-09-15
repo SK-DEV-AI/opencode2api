@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,15 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	// Restore the body so downstream error handling still sees the original
 	// payload when no retry happens below.
 	resp.Body = io.NopCloser(bytes.NewReader(errBody))
+	// ponytail: capped upstream-error snippet. Bodies never enter the ledger;
+	// the hub redactor scrubs keys. Names the 400 class instantly.
+	if len(errBody) > 0 {
+		snippet := string(errBody)
+		if len(snippet) > 240 {
+			snippet = snippet[:240]
+		}
+		g.logger.Info("upstream error returned or retried", "component", "upstream", "event", "upstream_error_body", "request_id", ids.Request, "model", route.ID, "status", resp.StatusCode, "snippet", snippet)
+	}
 	if !isStaleReasoningReference(errBody) {
 		return resp, effectiveRoute, nil
 	}
@@ -573,6 +583,24 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 	if meta := telemetry.MetaFromContext(ctx); meta != nil {
 		meta.AttemptOutcome = outcome
 		meta.Protocol = route.Protocol
+		// ponytail: per-request attempt ledger. Reads key:status:ms per leg
+		// on the request line: anon:429/12s key2:502/30s key5:200/9s.
+		label := keyID
+		if anonymous {
+			label = "anon"
+		}
+		leg := label + ":"
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				leg += "timeout"
+			} else {
+				leg += "transport"
+			}
+		} else {
+			leg += strconv.Itoa(status)
+		}
+		leg += ":" + strconv.FormatInt(max(duration.Milliseconds(), 0), 10) + "ms"
+		meta.Legs = append(meta.Legs, leg)
 	}
 	if g.monitor == nil {
 		return

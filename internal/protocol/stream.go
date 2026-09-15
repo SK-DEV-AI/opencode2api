@@ -47,16 +47,24 @@ func transcodeStream(w http.ResponseWriter, reader io.Reader, from, to Protocol,
 }
 
 func transcodeStreamWithUsage(w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
-	return TranscodeStream(context.Background(), w, reader, from, to, model)
+	usage, reported, _, err := TranscodeStream(context.Background(), w, reader, from, to, model)
+	return usage, reported, err
+}
+
+// StreamOutcome carries the terminal state of a transcoded stream for the
+// request log: stop reason plus the tail already sent downstream.
+type StreamOutcome struct {
+	Stop string
+	Tail string
 }
 
 // TranscodeStream is the request-aware form used by the
 // gateway. A cancelled client must not receive a synthetic upstream error
 // after its connection has gone away.
-func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
+func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, StreamOutcome, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
+		return Usage{}, false, StreamOutcome{}, fmt.Errorf("response writer does not support streaming")
 	}
 	parser := &bridgeStreamParser{
 		protocol:          from,
@@ -93,33 +101,53 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		}
 		return nil
 	})
+	outcome := func() StreamOutcome {
+		stop := emitter.StopReason()
+		out := StreamOutcome{Stop: stop}
+		if (stop == "length" || stop == "") && emitter.TextLen() > 0 {
+			out.Tail = emitter.TextTail(200)
+		}
+		return out
+	}
 	if readErr != nil {
 		if errors.Is(readErr, errStreamNormalTermination) {
-			return emitter.usage, emitter.usageReported, nil
+			return emitter.usage, emitter.usageReported, outcome(), nil
 		}
 		if ClientCanceled(ctx, readErr) {
-			return emitter.usage, emitter.usageReported, readErr
+			return emitter.usage, emitter.usageReported, outcome(), readErr
+		}
+		// ponytail: mid-stream reset AFTER partial content already went
+		// downstream. Header-phase failures never reach here (attempt loop
+		// retries them). Killing the turn now strands the partial reply
+		// and forces a manual continue. A length finish keeps the partial
+		// text and lets the client continue from it instead.
+		if termination == streamOpen && (emitter.TextLen() > 0 || emitter.ToolCount() > 0) {
+			emitter.SetStop("length")
+			if finishErr := emitter.Finish(); finishErr != nil {
+				return emitter.usage, emitter.usageReported, outcome(), finishErr
+			}
+			return emitter.usage, emitter.usageReported, outcome(), nil
 		}
 		if termination == streamOpen {
 			if emitErr := emitUnexpectedStreamError(emitter, readErr); emitErr != nil {
-				return emitter.usage, emitter.usageReported, emitErr
+				return emitter.usage, emitter.usageReported, outcome(), emitErr
 			}
 		}
-		return emitter.usage, emitter.usageReported, readErr
+		return emitter.usage, emitter.usageReported, outcome(), readErr
 	}
 	if termination == streamNormalTermination {
-		return emitter.usage, emitter.usageReported, nil
+		return emitter.usage, emitter.usageReported, outcome(), nil
 	}
 	if termination == streamErrorTermination {
-		return emitter.usage, emitter.usageReported, errStreamUpstreamFailure
+		return emitter.usage, emitter.usageReported, outcome(), errStreamUpstreamFailure
 	}
 	if ClientCanceled(ctx, nil) {
-		return emitter.usage, emitter.usageReported, ctx.Err()
+		return emitter.usage, emitter.usageReported, outcome(), ctx.Err()
 	}
 	if err := emitUnexpectedStreamError(emitter, errSSEUnexpectedEOF); err != nil {
-		return emitter.usage, emitter.usageReported, err
+		return emitter.usage, emitter.usageReported, outcome(), err
 	}
-	return emitter.usage, emitter.usageReported, errSSEUnexpectedEOF
+	return emitter.usage, emitter.usageReported, outcome(), errSSEUnexpectedEOF
 }
 
 func emitUnexpectedStreamError(emitter *bridgeStreamEmitter, cause error) error {
