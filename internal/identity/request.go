@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
+	"regexp"
 
 	"opencode2api/internal/jsonutil"
 )
@@ -40,7 +42,7 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	if signal == "" || signal == `{}` {
 		signal = RandomID("fallback", 16)
 	}
-	session := StableID("ses", signal)
+	session := CanonicalSessionID(signal)
 	projectSignal := jsonutil.FirstString(r.Header.Get("x-opencode-project"), jsonutil.StringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
 		projectSignal = "opencode2api:default-project"
@@ -79,6 +81,40 @@ func conversationSeed(body map[string]any) string {
 func StableID(prefix, value string) string {
 	sum := sha256.Sum256([]byte(prefix + "\x00" + value))
 	return prefix + "_" + hex.EncodeToString(sum[:12])
+}
+
+// canonicalSessionPattern matches OpenCode's canonical session format:
+// "ses_" + 12 lowercase hex timestamp characters + 14 Base62 characters.
+// Since 2026-09-16 the Zen free tier (Authorization: Bearer public) rejects
+// any other session shape with 403 FreeTierError.
+var canonicalSessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+
+const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// CanonicalSessionID returns signal unchanged when it already carries an
+// official OpenCode session (preserving upstream prompt-cache affinity).
+// Any other downstream identity (UUIDs, foreign client sessions, legacy
+// gateway sessions, conversation seeds) is deterministically hashed into the
+// canonical shape so the same conversation keeps a stable session.
+func CanonicalSessionID(signal string) string {
+	if canonicalSessionPattern.MatchString(signal) {
+		return signal
+	}
+	sum := sha256.Sum256([]byte("ses\x00" + signal))
+	timePart := hex.EncodeToString(sum[:6])
+	randomPart := base62Fixed(new(big.Int).SetBytes(sum[6:16]), 14)
+	return "ses_" + timePart + randomPart
+}
+
+func base62Fixed(n *big.Int, width int) string {
+	base := big.NewInt(62)
+	out := make([]byte, width)
+	remainder := new(big.Int)
+	for i := width - 1; i >= 0; i-- {
+		n.DivMod(n, base, remainder)
+		out[i] = base62Alphabet[remainder.Int64()]
+	}
+	return string(out)
 }
 
 func RandomID(prefix string, size int) string {
