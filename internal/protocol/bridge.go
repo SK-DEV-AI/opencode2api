@@ -73,6 +73,14 @@ type bridgeRequest struct {
 	FrequencyPenalty  any
 	PresencePenalty   any
 	Seed              any
+	// Native-fidelity knobs decoded from the client body and re-emitted
+	// upstream. prompt_cache_key is the big one: native opencode sends the
+	// session-sliced ID here and rides prompt-cache affinity; without it
+	// every proxied turn pays full attention over the whole history.
+	PromptCacheKey   any
+	SafetyIdentifier any
+	ServiceTier      any
+	Store            any
 }
 
 type Usage struct {
