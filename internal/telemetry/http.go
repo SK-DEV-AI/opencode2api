@@ -12,19 +12,24 @@ import (
 )
 
 type RequestMeta struct {
-	Model          string
-	Tier           string
-	Protocol       protocol.Protocol
-	Request        string
-	KeyID          string
-	Channel        string
-	Anonymous      bool
-	Proxy          string
-	Attempts       int
-	Legs           []string
-	Stop           string
-	Tail           string
-	Stream         bool
+	Model     string
+	Tier      string
+	Protocol  protocol.Protocol
+	Request   string
+	KeyID     string
+	Channel   string
+	Anonymous bool
+	Proxy     string
+	Attempts  int
+	Legs      []string
+	Stop      string
+	Tail      string
+	Stream    bool
+	// Shaped marks a key-tier free-model request whose wire body was
+	// normalized to agent shape (stream + core tools) like the anonymous
+	// lane. Non-streaming responses for shaped requests arrive as SSE
+	// and must be collapsed like anonymous ones.
+	Shaped         bool
 	Usage          protocol.Usage
 	UsageReported  bool
 	AttemptOutcome string
