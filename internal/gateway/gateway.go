@@ -2,6 +2,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -253,6 +254,18 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		if err != nil {
 			wire.WriteError(w, external, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
 			return
+		}
+		if upstreamRoute.Anonymous {
+			// The anonymous lane is served streaming (see forceStreamBody);
+			// collapse the events back into the single document this
+			// non-streaming client asked for.
+			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
+			if err != nil {
+				g.logger.Warn("anonymous stream collapse failed", "component", "conversion", "event", "anonymous_collapse_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "error", err)
+				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
+				return
+			}
+			responseBody = collapsed
 		}
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
 			meta.Usage, meta.UsageReported = usage, reported
