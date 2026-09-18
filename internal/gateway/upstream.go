@@ -254,6 +254,12 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	if len(body) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
+	// The anonymous free tier only serves agent-shaped streaming requests
+	// (anything else is rejected with 403 FreeTierError). Normalize the
+	// wire body here; the gateway collapses the stream back when the
+	// downstream client asked for a plain JSON reply. Key tiers keep their
+	// original bodies.
+	body = prepareAnonymousBody(body, route.ProtocolFor(config.TierZen))
 	for attempts < limit {
 		if ctx.Err() != nil {
 			// The request-level budget is already gone. Stop scanning instead
@@ -316,6 +322,141 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		lastErr = errors.New("no healthy anonymous proxies available")
 	}
 	return nil, lastErr, attempts
+}
+
+// anonymousCoreTools are the tool names the anonymous free tier expects on
+// an agent-shaped request. Requests without them are rejected with 403
+// FreeTierError. Only the names matter; the gateway synthesizes minimal
+// definitions for whichever ones the downstream client did not declare.
+var anonymousCoreTools = []string{"bash", "edit", "glob", "grep", "read"}
+
+// prepareAnonymousBody returns a copy of body normalized for the anonymous
+// free tier: streaming enabled plus the core agent tools present. Bodies
+// that already satisfy both (or are not JSON objects) are returned
+// unchanged.
+func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	changed := false
+	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
+		payload["stream"] = true
+		changed = true
+	}
+	if ensureAnonymousTools(payload, protocol) {
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+// ensureAnonymousTools appends minimal definitions for any missing core
+// tool so the request reads as an agent session upstream. It reports
+// whether the payload changed. Tools the client already declared are left
+// untouched.
+func ensureAnonymousTools(payload map[string]any, protocol wire.Protocol) bool {
+	raw, exists := payload["tools"]
+	if !exists {
+		payload["tools"] = anonymousToolset(protocol, nil)
+		return true
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return false
+	}
+	present := make(map[string]bool, len(items))
+	for _, item := range items {
+		if name := anonymousToolName(protocol, item); name != "" {
+			present[name] = true
+		}
+	}
+	missing := make([]string, 0, len(anonymousCoreTools))
+	for _, name := range anonymousCoreTools {
+		if !present[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		return false
+	}
+	payload["tools"] = append(items, anonymousToolset(protocol, missing)...)
+	return true
+}
+
+func anonymousToolName(protocol wire.Protocol, item any) string {
+	entry, ok := item.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if protocol == wire.Chat {
+		return jsonutil.StringAt(entry, "function", "name")
+	}
+	return jsonutil.StringAt(entry, "name")
+}
+
+func anonymousToolset(protocol wire.Protocol, names []string) []any {
+	if names == nil {
+		names = anonymousCoreTools
+	}
+	tools := make([]any, 0, len(names))
+	for _, name := range names {
+		tools = append(tools, anonymousTool(protocol, name))
+	}
+	return tools
+}
+
+func anonymousTool(protocol wire.Protocol, name string) map[string]any {
+	description := "Agent tool " + name
+	parameters := map[string]any{"type": "object", "properties": map[string]any{}}
+	switch protocol {
+	case wire.Chat:
+		return map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": description,
+				"parameters":  parameters,
+			},
+		}
+	case wire.Anthropic:
+		return map[string]any{
+			"name":         name,
+			"description":  description,
+			"input_schema": parameters,
+		}
+	default:
+		return map[string]any{
+			"type":        "function",
+			"name":        name,
+			"description": description,
+			"parameters":  parameters,
+		}
+	}
+}
+
+// forceStreamBody returns a copy of body with streaming enabled. Bodies
+// that already stream (or are not JSON objects) are returned unchanged.
+func forceStreamBody(body []byte) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if streaming, ok := payload["stream"].(bool); ok && streaming {
+		return body
+	}
+	payload["stream"] = true
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
 }
 
 // requestBodyDumpLimit caps how much of an outbound body is written to the log.
