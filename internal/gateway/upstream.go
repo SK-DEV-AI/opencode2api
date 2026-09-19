@@ -344,6 +344,9 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 		payload["stream"] = true
 		changed = true
 	}
+	if ensureAnonymousChatUsage(payload, protocol) {
+		changed = true
+	}
 	if ensureAnonymousTools(payload, protocol) {
 		changed = true
 	}
@@ -355,6 +358,26 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 		return body
 	}
 	return encoded
+}
+
+// ensureAnonymousChatUsage keeps token usage available when a non-streaming
+// request is forced onto the Chat SSE path. OpenAI-compatible Chat streams
+// require stream_options.include_usage for the final usage event.
+func ensureAnonymousChatUsage(payload map[string]any, protocol wire.Protocol) bool {
+	if protocol != wire.Chat {
+		return false
+	}
+	options, ok := payload["stream_options"].(map[string]any)
+	if !ok {
+		payload["stream_options"] = map[string]any{"include_usage": true}
+		return true
+	}
+	includeUsage, ok := options["include_usage"].(bool)
+	if ok && includeUsage {
+		return false
+	}
+	options["include_usage"] = true
+	return true
 }
 
 // ensureAnonymousTools appends minimal definitions for any missing core
