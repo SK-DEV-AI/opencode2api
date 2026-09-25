@@ -343,8 +343,13 @@ var anonymousCoreTools = []string{"bash", "edit", "glob", "grep", "read"}
 // prepareAnonymousBody returns a copy of body normalized for the anonymous
 // free tier: streaming enabled plus the core agent tools present. Bodies
 // that already satisfy both (or are not JSON objects) are returned
-// unchanged.
+// unchanged. System One payloads are decision requests, not agent traffic, so
+// they are forwarded verbatim; injecting streaming or tool definitions would
+// make the upstream reject them.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
+	if protocol == wire.SystemOne {
+		return body
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
@@ -352,6 +357,9 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	changed := false
 	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
 		payload["stream"] = true
+		changed = true
+	}
+	if ensureAnonymousChatUsage(payload, protocol) {
 		changed = true
 	}
 	if ensureAnonymousTools(payload, protocol) {
@@ -365,6 +373,26 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 		return body
 	}
 	return encoded
+}
+
+// ensureAnonymousChatUsage keeps token usage available when a non-streaming
+// request is forced onto the Chat SSE path. OpenAI-compatible Chat streams
+// require stream_options.include_usage for the final usage event.
+func ensureAnonymousChatUsage(payload map[string]any, protocol wire.Protocol) bool {
+	if protocol != wire.Chat {
+		return false
+	}
+	options, ok := payload["stream_options"].(map[string]any)
+	if !ok {
+		payload["stream_options"] = map[string]any{"include_usage": true}
+		return true
+	}
+	includeUsage, ok := options["include_usage"].(bool)
+	if ok && includeUsage {
+		return false
+	}
+	options["include_usage"] = true
+	return true
 }
 
 // ensureAnonymousTools appends minimal definitions for any missing core
@@ -510,7 +538,6 @@ func (g *Gateway) dumpOutboundBodies(route models.Route, bodies map[config.Tier]
 	}
 }
 
-// shapeKeyBody normalizes key-tier free-model wire bodies to agent shape
 // shapeKeyBody normalizes key-tier free-model wire bodies to agent shape
 // (stream + core tools), mirroring the anonymous lane. Upstream now
 // rejects non-agent-shaped free-tier requests on every lane with 403
