@@ -200,17 +200,35 @@ func ClientCanceled(ctx context.Context, streamErr error) bool {
 // sseFlushWriter preserves an upstream SSE byte stream while making each
 // successful write visible to the client immediately. io.Copy is free to
 // choose large writes, so flushing in Write is the only reliable place to
-// keep same-protocol streams live.
+// keep same-protocol streams live. Written counts bytes handed downstream;
+// the gateway uses it for the zero-delivery replay.
 type sseFlushWriter struct {
 	writer  io.Writer
 	flusher http.Flusher
+	written int64
 }
 
 func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	n, err := writer.writer.Write(data)
 	if n > 0 {
+		writer.written += int64(n)
 		writer.flusher.Flush()
 	}
+	return n, err
+}
+
+// countReader records how many bytes upstream produced. Together with the
+// downstream byte count it tells a clean failure apart: zero bytes from
+// upstream plus zero bytes downstream is a reset before delivery (safe to
+// replay); anything else means one side already saw data.
+type countReader struct {
+	reader io.Reader
+	seen   int64
+}
+
+func (reader *countReader) Read(data []byte) (int, error) {
+	n, err := reader.reader.Read(data)
+	reader.seen += int64(n)
 	return n, err
 }
 
@@ -224,7 +242,12 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
 	}
 	observer := newStreamUsageObserver(protocol)
-	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
+	// ponytail: count both sides so a pre-delivery reset can be told apart
+	// from a torn stream. Upstream delivered nothing AND downstream received
+	// nothing means the client saw an idle connection: safe to replay.
+	counter := &countReader{reader: reader}
+	sink := &sseFlushWriter{writer: w, flusher: flusher}
+	_, copyErr := io.Copy(sink, io.TeeReader(counter, observer))
 	usage := observer.Finish()
 	if observer.ErrorTermination() {
 		if copyErr != nil {
@@ -240,6 +263,14 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 			copyErr = ctx.Err()
 		}
 		return usage, observer.Reported(), copyErr
+	}
+	if counter.seen == 0 && sink.written == 0 && copyErr != nil {
+		// ponytail: zero-delivery reset on the passthrough lane. Matches the
+		// TranscodeStream contract: no error frame emitted, the gateway
+		// replays the turn on a fresh attempt inside the same connection.
+		// Gated on a read failure so a clean empty close keeps the old
+		// error-frame behavior instead of spending a replay on it.
+		return usage, observer.Reported(), ErrZeroDeliveryReset
 	}
 	cause := observer.ParseError()
 	if copyErr != nil {
