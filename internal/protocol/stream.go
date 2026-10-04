@@ -200,35 +200,17 @@ func ClientCanceled(ctx context.Context, streamErr error) bool {
 // sseFlushWriter preserves an upstream SSE byte stream while making each
 // successful write visible to the client immediately. io.Copy is free to
 // choose large writes, so flushing in Write is the only reliable place to
-// keep same-protocol streams live. Written counts bytes handed downstream;
-// the gateway uses it for the zero-delivery replay.
+// keep same-protocol streams live.
 type sseFlushWriter struct {
 	writer  io.Writer
 	flusher http.Flusher
-	written int64
 }
 
 func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	n, err := writer.writer.Write(data)
 	if n > 0 {
-		writer.written += int64(n)
 		writer.flusher.Flush()
 	}
-	return n, err
-}
-
-// countReader records how many bytes upstream produced. Together with the
-// downstream byte count it tells a clean failure apart: zero bytes from
-// upstream plus zero bytes downstream is a reset before delivery (safe to
-// replay); anything else means one side already saw data.
-type countReader struct {
-	reader io.Reader
-	seen   int64
-}
-
-func (reader *countReader) Read(data []byte) (int, error) {
-	n, err := reader.reader.Read(data)
-	reader.seen += int64(n)
 	return n, err
 }
 
@@ -242,12 +224,12 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
 	}
 	observer := newStreamUsageObserver(protocol)
-	// ponytail: count both sides so a pre-delivery reset can be told apart
-	// from a torn stream. Upstream delivered nothing AND downstream received
-	// nothing means the client saw an idle connection: safe to replay.
-	counter := &countReader{reader: reader}
-	sink := &sseFlushWriter{writer: w, flusher: flusher}
-	_, copyErr := io.Copy(sink, io.TeeReader(counter, observer))
+	// ponytail: the observer already parses every SSE frame for usage, so it
+	// is also the delivery signal. A reset before any data frame reached
+	// downstream (idle connection, keepalives only, preamble without data)
+	// is safe to replay: the client saw nothing actionable. Anything with
+	// data frames keeps the old error-frame path.
+	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
 	usage := observer.Finish()
 	if observer.ErrorTermination() {
 		if copyErr != nil {
@@ -264,7 +246,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		}
 		return usage, observer.Reported(), copyErr
 	}
-	if counter.seen == 0 && sink.written == 0 && copyErr != nil {
+	if !observer.DataDelivered() && copyErr != nil {
 		// ponytail: zero-delivery reset on the passthrough lane. Matches the
 		// TranscodeStream contract: no error frame emitted, the gateway
 		// replays the turn on a fresh attempt inside the same connection.
@@ -294,6 +276,10 @@ type streamUsageObserver struct {
 	normal   bool
 	error    bool
 	parseErr error
+	// dataFrames counts SSE data frames observed upstream. Comment-only
+	// traffic (keepalives like ": ping") does not count: the client saw
+	// nothing actionable, so a reset there is still safe to replay.
+	dataFrames int
 }
 
 func newStreamUsageObserver(protocol Protocol) *streamUsageObserver {
@@ -332,8 +318,14 @@ func (observer *streamUsageObserver) ErrorTermination() bool { return observer.e
 
 func (observer *streamUsageObserver) ParseError() error { return observer.parseErr }
 
+// DataDelivered reports whether any SSE data frame arrived upstream. A
+// stream that died on keepalives alone replays safely: comments carry no
+// model content, so the client saw nothing actionable.
+func (observer *streamUsageObserver) DataDelivered() bool { return observer.dataFrames > 0 }
+
 func (observer *streamUsageObserver) consume(frame []byte) {
 	_ = readSSE(strings.NewReader(string(frame)), func(eventName, data string) error {
+		observer.dataFrames++
 		events, err := observer.parser.Parse(eventName, data)
 		if err != nil {
 			if observer.parseErr == nil {

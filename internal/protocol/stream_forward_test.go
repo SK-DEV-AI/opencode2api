@@ -94,3 +94,41 @@ func TestForwardStreamHealthyPassthrough(t *testing.T) {
 		t.Fatalf("healthy stream must pass through, got %q", body)
 	}
 }
+
+func TestForwardStreamKeepaliveOnlyResetReplays(t *testing.T) {
+	// Upstream sent only SSE comments (keepalives) before the reset. No
+	// data frame reached downstream, so the turn is safe to replay.
+	rec := httptest.NewRecorder()
+	_, _, err := ForwardStream(t.Context(), rec, &resetReader{body: ": ping\n\n"}, Chat, "big-pickle")
+	if !errors.Is(err, ErrZeroDeliveryReset) {
+		t.Fatalf("keepalive-only reset must signal replay, got %v", err)
+	}
+	if body := rec.Body.String(); strings.Contains(body, `"error"`) {
+		t.Fatalf("replay path must not emit an error frame, got %q", body)
+	}
+}
+
+func TestForwardStreamErrorEventIsNotReplay(t *testing.T) {
+	// An upstream error event is a delivered verdict, not a torn stream:
+	// it must flow downstream as-is, never trigger a replay.
+	rec := httptest.NewRecorder()
+	boom := "data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\"}}\n\n"
+	_, _, err := ForwardStream(t.Context(), rec, &resetReader{body: boom}, Chat, "big-pickle")
+	if errors.Is(err, ErrZeroDeliveryReset) {
+		t.Fatalf("upstream error event must not signal replay")
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "boom") {
+		t.Fatalf("upstream error must reach downstream, got %q", body)
+	}
+}
+
+func TestForwardStreamUsageOnlyResetKeepsErrorFrame(t *testing.T) {
+	// A usage-only data frame still counts as delivery: the client already
+	// saw model metadata, so replaying would double-report usage.
+	rec := httptest.NewRecorder()
+	usageOnly := "data: {\"id\":\"r1\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n"
+	_, _, err := ForwardStream(t.Context(), rec, &resetReader{body: usageOnly}, Chat, "big-pickle")
+	if errors.Is(err, ErrZeroDeliveryReset) {
+		t.Fatalf("usage-carrying reset must not signal replay")
+	}
+}
