@@ -162,7 +162,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 		defer cancel()
-		resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
+		resp, upstreamRoute, spent, err := g.doUpstream(requestCtx, route, bodies, ids)
 		if err != nil {
 			finalTier := route.Tier
 			if meta != nil && meta.Tier != "" {
@@ -208,7 +208,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			// speak the same protocol, transcode otherwise.
 			serveOne := func(attempt models.Route, body io.Reader) (wire.Usage, bool, error) {
 				if external == attempt.Protocol {
-					return wire.ForwardStream(r.Context(), w, body, attempt.Protocol, model)
+					served, reported, outcome, streamErr := wire.ForwardStream(r.Context(), w, body, attempt.Protocol, model)
+					if meta != nil {
+						meta.Stop, meta.Tail = outcome.Stop, outcome.Tail
+					}
+					return served, reported, streamErr
 				}
 				served, reported, outcome, streamErr := wire.TranscodeStream(r.Context(), w, body, attempt.Protocol, external, model)
 				if meta != nil {
@@ -226,10 +230,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			if errors.Is(err, wire.ErrZeroDeliveryReset) && !wire.ClientCanceled(r.Context(), err) {
 				resp.Body.Close()
 				g.logger.Info("replaying zero-delivery stream", "component", "stream", "event", "stream_zero_replay", "request_id", ids.Request, "model", model, "error", err)
-				retryResp, retryRoute, retryErr := g.doUpstream(requestCtx, route, bodies, ids)
+				retryResp, retryRoute, total, retryErr := g.doUpstreamWithOffset(requestCtx, route, bodies, ids, spent)
 				if retryErr == nil && retryResp != nil && retryResp.StatusCode/100 == 2 {
 					defer retryResp.Body.Close()
 					upstreamRoute = retryRoute
+					spent = total
 					usage, usageReported, err = serveOne(upstreamRoute, retryResp.Body)
 					if meta != nil {
 						meta.Tier = string(upstreamRoute.Tier)
@@ -238,9 +243,14 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				} else {
 					// ponytail: replay failed or non-2xx. The first
 					// attempt's error frame was suppressed, so emit
-					// now: a clean error beats a client hang.
+					// now: a clean error beats a client hang. Report the
+					// replay's outcome, not the suppressed first error:
+					// emitting the stale cause misattributes the failure.
 					if retryErr != nil {
+						err = retryErr
 						g.logger.Warn("zero-delivery replay failed", "component", "stream", "event", "stream_zero_replay_failed", "request_id", ids.Request, "model", model, "error", retryErr)
+					} else if retryResp != nil {
+						err = fmt.Errorf("upstream returned HTTP %d on zero-delivery replay", retryResp.StatusCode)
 					}
 					if retryResp != nil {
 						retryResp.Body.Close()
@@ -272,7 +282,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		if upstreamRoute.Anonymous || (meta != nil && meta.Shaped) {
 			// Key-tier shaped requests were force-streamed like the
 			// anonymous lane; collapse the same way.
-			// The anonymous lane is served streaming (see forceStreamBody);
+			// The anonymous lane is served streaming (see prepareAnonymousBody);
 			// collapse the events back into the single document this
 			// non-streaming client asked for.
 			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
@@ -364,7 +374,7 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	}
 	requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()
-	resp, upstreamRoute, err := g.doUpstream(requestCtx, route, bodies, ids)
+	resp, upstreamRoute, _, err := g.doUpstream(requestCtx, route, bodies, ids)
 	if err != nil {
 		finalTier := route.Tier
 		if meta != nil && meta.Tier != "" {
@@ -443,6 +453,7 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 				// preferred tier. Do not reject a request before the preferred
 				// upstream has even been tried; that tier is attempted only if
 				// the request actually falls back.
+				g.logger.Debug("skipping fallback tier with incompatible request shape", "component", "conversion", "event", "fallback_tier_skipped", "model", jsonutil.StringAt(input, "model"), "tier", tier, "protocol", protocol, "error", err)
 				continue
 			}
 			return nil, fmt.Errorf("prepare %s upstream request: %w", tier, err)

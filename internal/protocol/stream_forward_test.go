@@ -49,7 +49,7 @@ func (f *healthyChatStream) Read(data []byte) (int, error) {
 func TestForwardStreamZeroDeliveryReset(t *testing.T) {
 	rec := httptest.NewRecorder()
 	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	_, _, err := ForwardStream(t.Context(), rec, &resetReader{}, Chat, "big-pickle")
+	_, _, _, err := ForwardStream(t.Context(), rec, &resetReader{}, Chat, "big-pickle")
 	if !errors.Is(err, ErrZeroDeliveryReset) {
 		t.Fatalf("expected ErrZeroDeliveryReset, got %v", err)
 	}
@@ -62,12 +62,15 @@ func TestForwardStreamPartialResetKeepsErrorFrame(t *testing.T) {
 	rec := httptest.NewRecorder()
 	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	partial := "data: {\"id\":\"r1\",\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n"
-	_, _, err := ForwardStream(t.Context(), rec, &resetReader{body: partial}, Chat, "big-pickle")
+	_, _, outcome, err := ForwardStream(t.Context(), rec, &resetReader{body: partial}, Chat, "big-pickle")
 	if errors.Is(err, ErrZeroDeliveryReset) {
 		t.Fatalf("partial delivery must not signal zero-delivery replay")
 	}
 	if err == nil {
 		t.Fatalf("expected torn-stream error after partial delivery")
+	}
+	if !outcome.Delivered {
+		t.Fatalf("partial outcome must claim delivery")
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "hel") {
 		t.Fatalf("partial bytes must reach downstream, got %q", body)
@@ -76,7 +79,7 @@ func TestForwardStreamPartialResetKeepsErrorFrame(t *testing.T) {
 
 func TestForwardStreamCleanEmptyCloseIsNotReplay(t *testing.T) {
 	rec := httptest.NewRecorder()
-	_, _, err := ForwardStream(t.Context(), rec, strings.NewReader(""), Chat, "big-pickle")
+	_, _, _, err := ForwardStream(t.Context(), rec, strings.NewReader(""), Chat, "big-pickle")
 	if errors.Is(err, ErrZeroDeliveryReset) {
 		t.Fatalf("clean empty close must not trigger a replay")
 	}
@@ -84,9 +87,15 @@ func TestForwardStreamCleanEmptyCloseIsNotReplay(t *testing.T) {
 
 func TestForwardStreamHealthyPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
-	_, _, err := ForwardStream(t.Context(), rec, &healthyChatStream{}, Chat, "big-pickle")
+	_, _, outcome, err := ForwardStream(t.Context(), rec, &healthyChatStream{}, Chat, "big-pickle")
 	if err != nil {
 		t.Fatalf("healthy passthrough must not fail, got %v", err)
+	}
+	if outcome.Stop != "stop" {
+		t.Fatalf("healthy passthrough must report stop, got %q", outcome.Stop)
+	}
+	if !outcome.Delivered {
+		t.Fatalf("healthy passthrough must claim delivery")
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "hi") {
 		t.Fatalf("healthy stream must pass through, got %q", body)
@@ -97,7 +106,7 @@ func TestForwardStreamKeepaliveOnlyResetReplays(t *testing.T) {
 	// Upstream sent only SSE comments (keepalives) before the reset. No
 	// data frame reached downstream, so the turn is safe to replay.
 	rec := httptest.NewRecorder()
-	_, _, err := ForwardStream(t.Context(), rec, &resetReader{body: ": ping\n\n"}, Chat, "big-pickle")
+	_, _, _, err := ForwardStream(t.Context(), rec, &resetReader{body: ": ping\n\n"}, Chat, "big-pickle")
 	if !errors.Is(err, ErrZeroDeliveryReset) {
 		t.Fatalf("keepalive-only reset must signal replay, got %v", err)
 	}
@@ -111,7 +120,7 @@ func TestForwardStreamErrorEventIsNotReplay(t *testing.T) {
 	// it must flow downstream as-is, never trigger a replay.
 	rec := httptest.NewRecorder()
 	boom := "data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\"}}\n\n"
-	_, _, err := ForwardStream(t.Context(), rec, &resetReader{body: boom}, Chat, "big-pickle")
+	_, _, _, err := ForwardStream(t.Context(), rec, &resetReader{body: boom}, Chat, "big-pickle")
 	if errors.Is(err, ErrZeroDeliveryReset) {
 		t.Fatalf("upstream error event must not signal replay")
 	}
@@ -126,7 +135,7 @@ func TestForwardStreamUsageOnlyResetKeepsErrorFrame(t *testing.T) {
 	// delivery, since the bytes already reached the client verbatim.
 	rec := httptest.NewRecorder()
 	usageOnly := "data: {\"id\":\"r1\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n"
-	_, _, err := ForwardStream(t.Context(), rec, &resetReader{body: usageOnly}, Chat, "big-pickle")
+	_, _, _, err := ForwardStream(t.Context(), rec, &resetReader{body: usageOnly}, Chat, "big-pickle")
 	if errors.Is(err, ErrZeroDeliveryReset) {
 		t.Fatalf("usage-carrying reset must not signal replay")
 	}

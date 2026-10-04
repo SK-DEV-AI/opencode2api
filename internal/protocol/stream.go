@@ -46,16 +46,6 @@ type bridgeStreamEvent struct {
 	Usage      *Usage
 }
 
-func transcodeStream(w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) error {
-	_, _, err := transcodeStreamWithUsage(w, reader, from, to, model)
-	return err
-}
-
-func transcodeStreamWithUsage(w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
-	usage, reported, _, err := TranscodeStream(context.Background(), w, reader, from, to, model)
-	return usage, reported, err
-}
-
 // StreamOutcome carries the terminal state of a transcoded stream for the
 // request log: stop reason plus the tail already sent downstream.
 type StreamOutcome struct {
@@ -214,14 +204,10 @@ func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-func forwardSSEWithUsage(w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, error) {
-	return ForwardStream(context.Background(), w, reader, protocol, model)
-}
-
-func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, error) {
+func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, StreamOutcome, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
+		return Usage{}, false, StreamOutcome{}, fmt.Errorf("response writer does not support streaming")
 	}
 	observer := newStreamUsageObserver(protocol)
 	// ponytail: the observer already parses every SSE frame for usage, so it
@@ -231,20 +217,29 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 	// data frames keeps the old error-frame path.
 	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
 	usage := observer.Finish()
+	// ponytail: passthrough stop/tail census. Same-protocol streams are the
+	// common case, yet the request log showed an empty stop for all of them
+	// because only the transcode lane reported an outcome. The stop is the
+	// raw upstream finish reason; the tail follows the transcode rule
+	// (populated on truncated turns, where diagnosis needs it).
+	outcome := StreamOutcome{Stop: observer.StopReason(), Delivered: observer.DataDelivered()}
+	if (outcome.Stop == "length" || outcome.Stop == "") && observer.TextLen() > 0 {
+		outcome.Tail = observer.TextTail(200)
+	}
 	if observer.ErrorTermination() {
 		if copyErr != nil {
-			return usage, observer.Reported(), copyErr
+			return usage, observer.Reported(), outcome, copyErr
 		}
-		return usage, observer.Reported(), errStreamUpstreamFailure
+		return usage, observer.Reported(), outcome, errStreamUpstreamFailure
 	}
 	if observer.NormalTermination() && observer.ParseError() == nil {
-		return usage, observer.Reported(), copyErr
+		return usage, observer.Reported(), outcome, copyErr
 	}
 	if ClientCanceled(ctx, copyErr) {
 		if copyErr == nil {
 			copyErr = ctx.Err()
 		}
-		return usage, observer.Reported(), copyErr
+		return usage, observer.Reported(), outcome, copyErr
 	}
 	if !observer.DataDelivered() && copyErr != nil {
 		// ponytail: zero-delivery reset on the passthrough lane. Matches the
@@ -252,7 +247,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		// replays the turn on a fresh attempt inside the same connection.
 		// Gated on a read failure so a clean empty close keeps the old
 		// error-frame behavior instead of spending a replay on it.
-		return usage, observer.Reported(), ErrZeroDeliveryReset
+		return usage, observer.Reported(), outcome, ErrZeroDeliveryReset
 	}
 	cause := observer.ParseError()
 	if copyErr != nil {
@@ -263,9 +258,9 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 	}
 	emitter := newBridgeStreamEmitter(w, flusher, protocol, model)
 	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
-		return usage, observer.Reported(), err
+		return usage, observer.Reported(), outcome, err
 	}
-	return usage, observer.Reported(), cause
+	return usage, observer.Reported(), outcome, cause
 }
 
 type streamUsageObserver struct {
@@ -276,6 +271,11 @@ type streamUsageObserver struct {
 	normal   bool
 	error    bool
 	parseErr error
+	stop     string
+	// text accumulates streamed text for the tail census. Bounded at
+	// 4 KiB: only the last 200 characters are ever reported, so keeping
+	// the whole reply in memory would be waste on long turns.
+	text strings.Builder
 	// dataFrames counts SSE data frames observed upstream. Comment-only
 	// traffic (keepalives like ": ping") does not count: the client saw
 	// nothing actionable, so a reset there is still safe to replay.
@@ -318,6 +318,23 @@ func (observer *streamUsageObserver) ErrorTermination() bool { return observer.e
 
 func (observer *streamUsageObserver) ParseError() error { return observer.parseErr }
 
+// StopReason reports the raw upstream finish reason observed on the
+// stream ("", "stop", "length", "tool_calls", ...), or "" when the
+// stream never carried a terminal event.
+func (observer *streamUsageObserver) StopReason() string { return observer.stop }
+
+// TextLen reports how much text passed through on this stream.
+func (observer *streamUsageObserver) TextLen() int { return observer.text.Len() }
+
+// TextTail returns the last n characters streamed.
+func (observer *streamUsageObserver) TextTail(n int) string {
+	full := observer.text.String()
+	if len(full) > n {
+		full = full[len(full)-n:]
+	}
+	return full
+}
+
 // DataDelivered reports whether any SSE data frame arrived upstream. A
 // stream that died on keepalives alone replays safely: comments carry no
 // model content, so the client saw nothing actionable.
@@ -339,6 +356,17 @@ func (observer *streamUsageObserver) consume(frame []byte) {
 				observer.normal = true
 			case "error":
 				observer.error = true
+			case "finish":
+				observer.stop = event.Stop
+			case "text":
+				if observer.text.Len() < 4096 {
+					remaining := 4096 - observer.text.Len()
+					if len(event.Text) > remaining {
+						observer.text.WriteString(event.Text[len(event.Text)-remaining:])
+					} else {
+						observer.text.WriteString(event.Text)
+					}
+				}
 			}
 			if event.Usage != nil {
 				observer.reported = true

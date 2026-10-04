@@ -53,13 +53,17 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 	return override, ok && override.KeyID != ""
 }
 
-func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
-	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
+func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, int, error) {
+	return g.doUpstreamWithOffset(ctx, route, bodies, ids, 0)
+}
+
+func (g *Gateway) doUpstreamWithOffset(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, models.Route, int, error) {
+	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, attemptOffset)
 	if _, selected := debugKeyOverrideFrom(ctx); selected {
-		return resp, effectiveRoute, err
+		return resp, effectiveRoute, attempts, err
 	}
 	if err != nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
-		return resp, effectiveRoute, err
+		return resp, effectiveRoute, attempts, err
 	}
 	origBody := resp.Body
 	errBody, readErr := io.ReadAll(io.LimitReader(origBody, 1<<20))
@@ -69,7 +73,7 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	httpx.DrainAndClose(origBody)
 	if readErr != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(errBody))
-		return resp, effectiveRoute, nil
+		return resp, effectiveRoute, attempts, nil
 	}
 	// Restore the body so downstream error handling still sees the original
 	// payload when no retry happens below.
@@ -84,11 +88,11 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 		g.logger.Info("upstream error returned or retried", "component", "upstream", "event", "upstream_error_body", "request_id", ids.Request, "model", route.ID, "status", resp.StatusCode, "snippet", snippet)
 	}
 	if !isStaleReasoningReference(errBody) {
-		return resp, effectiveRoute, nil
+		return resp, effectiveRoute, attempts, nil
 	}
 	stripped, changed := stripStaleReasoningInputs(effectiveRoute, bodies)
 	if !changed {
-		return resp, effectiveRoute, nil
+		return resp, effectiveRoute, attempts, nil
 	}
 	// The referenced reasoning items belong to an upstream chain this session
 	// can no longer address (e.g. an interrupted stream). Replay once without
@@ -102,7 +106,7 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	// the reply from the chain the client still holds; the stale references are
 	// already removed from the payload itself.
 	g.logger.Info("retrying upstream without stale reasoning references", "component", "upstream", "event", "reasoning_reference_retry", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "attempt_offset", attempts)
-	retryResp, retryRoute, _, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, ids, attempts)
+	retryResp, retryRoute, retryAttempts, retryErr := g.doUpstreamTiers(ctx, effectiveRoute, stripped, ids, attempts)
 	if retryErr != nil || retryResp == nil || retryResp.StatusCode/100 != 2 {
 		retryStatus := 0
 		if retryResp != nil {
@@ -112,9 +116,9 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 		g.logger.Warn("reasoning reference retry failed; returning original error", "component", "upstream", "event", "reasoning_reference_retry_failed", "request_id", ids.Request, "model", route.ID, "tier", effectiveRoute.Tier, "error", retryErr, "retry_status", retryStatus)
 		fallback := *resp
 		fallback.Body = io.NopCloser(bytes.NewReader(errBody))
-		return &fallback, effectiveRoute, nil
+		return &fallback, effectiveRoute, retryAttempts, nil
 	}
-	return retryResp, retryRoute, nil
+	return retryResp, retryRoute, retryAttempts, nil
 }
 
 // isStaleReasoningReference reports whether an upstream 400 body describes a
@@ -477,24 +481,6 @@ func anonymousTool(protocol wire.Protocol, name string) map[string]any {
 			"parameters":  parameters,
 		}
 	}
-}
-
-// forceStreamBody returns a copy of body with streaming enabled. Bodies
-// that already stream (or are not JSON objects) are returned unchanged.
-func forceStreamBody(body []byte) []byte {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body
-	}
-	if streaming, ok := payload["stream"].(bool); ok && streaming {
-		return body
-	}
-	payload["stream"] = true
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return body
-	}
-	return encoded
 }
 
 // requestBodyDumpLimit caps how much of an outbound body is written to the log.

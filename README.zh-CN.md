@@ -111,6 +111,7 @@ docker run -d --name opencode2api \
 | POST | `/v1/chat/completions` | Chat Completions。         |
 | POST | `/v1/responses`        | Responses。                |
 | POST | `/v1/messages`         | Anthropic Messages。       |
+| POST | `/v1/systemone`        | System One 结构化决策。    |
 | GET  | `/healthz`             | 就绪状态与资源汇总。       |
 
 先获取可用模型：
@@ -151,6 +152,17 @@ curl http://localhost:8080/v1/messages \
 ```
 
 需要流式响应时，在请求体中加入 `"stream": true`，并使用 `curl -N`。响应通过 `x-request-id` 提供请求关联标识。API 请求体上限为 32 MiB。
+
+**System One**
+
+```bash
+curl http://localhost:8080/v1/systemone \
+  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"MODEL_ID","state":"...","questions":[...]}'
+```
+
+System One 将自由文本状态与类型化问题配对，并返回类型化答案，因此其负载与 chat/responses 桥接结构完全不同，只做原样转发，不做任何转换。只有原生协议为 System One 的模型才能在本接口提供服务；在消息接口（`/v1/chat/completions`、`/v1/responses`）上提交的决策负载同样原样转发，而不经过转换。上游的流式回复按原样透传，不做中断恢复。
 
 ### 协议兼容边界
 
@@ -198,7 +210,7 @@ curl http://localhost:8080/v1/messages \
 
 匿名阶段不受 `retry.max_attempts` 截断，但所有阶段共享请求总超时。网络错误、认证失败、限流和服务端错误可以触发 Key 轮换；其他 4xx 会结束当前 Tier，仍可继续尝试另一个可用 Tier。
 
-每个 Tier 使用自己的原生协议编码请求。流开始后不再切换节点重新生成。识别到过期的 Responses reasoning 引用时，可执行一次修复重试；指定 Key 的诊断不会执行该重试。
+每个 Tier 使用自己的原生协议编码请求。流开始后不再切换节点重新生成，除非上游在下游收到任何内容之前中断（该轮在本连接内重放一次）。识别到过期的 Responses reasoning 引用时，可执行一次修复重试；指定 Key 的诊断不会执行该重试。
 
 只有匿名通道可用时，`/v1/models` 仅展示符合匿名条件的模型。
 

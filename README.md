@@ -111,6 +111,7 @@ Send `Authorization: Bearer YOUR_LOCAL_API_KEY` or `x-api-key: YOUR_LOCAL_API_KE
 | POST   | `/v1/chat/completions` | Chat Completions.                                         |
 | POST   | `/v1/responses`        | Responses.                                                |
 | POST   | `/v1/messages`         | Anthropic Messages.                                       |
+| POST   | `/v1/systemone`        | System One structured decisions.                          |
 | GET    | `/healthz`             | Readiness and resource summary.                           |
 
 Discover an available model first:
@@ -151,6 +152,17 @@ curl http://localhost:8080/v1/messages \
 ```
 
 For streaming, add `"stream": true` to the body and use `curl -N`. Responses include an `x-request-id` for correlation. API request bodies are limited to 32 MiB.
+
+**System One**
+
+```bash
+curl http://localhost:8080/v1/systemone \
+  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"MODEL_ID","state":"...","questions":[...]}'
+```
+
+System One pairs a free-form state with typed questions and returns typed answers, so the payload shares no shape with the chat/responses bridge and is relayed verbatim, never translated. Only models whose native protocol is System One are served here; a decision payload submitted on a message endpoint (`/v1/chat/completions`, `/v1/responses`) is likewise relayed verbatim instead of converted. Streaming upstream replies are relayed as-is without reset recovery.
 
 ### Compatibility boundaries
 
@@ -198,7 +210,7 @@ The routing sequence is:
 
 Anonymous attempts are not cut short by `retry.max_attempts`, but all attempts share the request timeout. Network errors, authentication failures, rate limits, and server errors can rotate keys. Other 4xx responses end the current tier; another available tier may still be tried.
 
-Requests are encoded for each tier's own protocol. Once a stream has started, the gateway does not retry generation on another node. A recognized stale Responses reasoning reference can trigger one repair pass; selected-key diagnostics never use that replay.
+Requests are encoded for each tier's own protocol. Once a stream has started, the gateway does not retry generation on another node, except when the upstream resets before anything reached downstream (the turn is replayed once inside the same connection). A recognized stale Responses reasoning reference can trigger one repair pass; selected-key diagnostics never use that replay.
 
 When only anonymous access is configured, `/v1/models` exposes only models eligible for that lane.
 
