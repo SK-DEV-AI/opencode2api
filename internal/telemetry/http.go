@@ -12,10 +12,15 @@ import (
 )
 
 type RequestMeta struct {
-	Model     string
-	Tier      string
-	Protocol  protocol.Protocol
-	Request   string
+	Model    string
+	Tier     string
+	Protocol protocol.Protocol
+	Request  string
+	// Session is the canonical upstream session (ses_...). All turns of one
+	// conversation share it, so per-session token burn is visible in logs
+	// and monitoring: every session draws from the same upstream IP bucket
+	// on the anonymous lane.
+	Session   string
 	KeyID     string
 	Channel   string
 	Anonymous bool
@@ -111,6 +116,7 @@ func Middleware(monitor *Monitor, logger *slog.Logger, next http.Handler) http.H
 			if meta.Channel != "" {
 				logger.Info("request routed", "component", "http", "event", "request_routed", "method", r.Method,
 					"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "request_id", meta.Request,
+					"session", meta.Session,
 					"model", meta.Model, "tier", meta.Tier, "key_id", meta.KeyID, "channel", meta.Channel,
 					"anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "outcome", outcome,
 					"stop", meta.Stop, "in", meta.Usage.Input, "out", meta.Usage.Output, "reasoning_tokens", meta.Usage.Reasoning, "cached", meta.Usage.Cached, "tail", meta.Tail)

@@ -25,6 +25,7 @@ type metricBucket struct {
 	tokens        TokenCounts
 	usageModels   map[string]TokenCounts
 	usageTiers    map[string]TokenCounts
+	usageSessions map[string]TokenCounts
 }
 
 func (b *metricBucket) reset(minute int64) {
@@ -32,6 +33,7 @@ func (b *metricBucket) reset(minute int64) {
 		minute: minute, endpoints: make(map[string]uint64), models: make(map[string]uint64),
 		tiers: make(map[string]uint64), statuses: make(map[string]uint64),
 		usageModels: make(map[string]TokenCounts), usageTiers: make(map[string]TokenCounts),
+		usageSessions: make(map[string]TokenCounts),
 	}
 }
 
@@ -50,6 +52,10 @@ type UsagePeriod struct {
 	Tokens   TokenCounts            `json:"tokens"`
 	Models   map[string]TokenCounts `json:"models"`
 	Tiers    map[string]TokenCounts `json:"tiers"`
+	// Sessions maps canonical session ID to token burn. Sessions share one
+	// upstream IP bucket on the anonymous lane, so this shows which
+	// conversation is draining the daily budget.
+	Sessions map[string]TokenCounts `json:"sessions"`
 }
 
 type UsageSnapshot struct {
@@ -93,6 +99,7 @@ type UpstreamAttempt struct {
 type UpstreamRequest struct {
 	Time       time.Time `json:"time"`
 	RequestID  string    `json:"request_id"`
+	Session    string    `json:"session,omitempty"`
 	Model      string    `json:"model"`
 	Tier       string    `json:"tier,omitempty"`
 	KeyID      string    `json:"key_id,omitempty"`
@@ -307,10 +314,12 @@ func (m *Monitor) Record(endpoint string, status int, duration time.Duration, me
 			addTokenMap(bucket.usageTiers, meta.Tier, tokens)
 			addTokenMap(m.lifetimeUsage.Models, meta.Model, tokens)
 			addTokenMap(m.lifetimeUsage.Tiers, meta.Tier, tokens)
+			addTokenMap(bucket.usageSessions, meta.Session, tokens)
+			addTokenMap(m.lifetimeUsage.Sessions, meta.Session, tokens)
 		}
 		if meta.Request != "" && meta.Model != "" {
 			request := UpstreamRequest{
-				Time: time.Now().UTC(), RequestID: meta.Request, Model: meta.Model, Tier: meta.Tier,
+				Time: time.Now().UTC(), RequestID: meta.Request, Session: meta.Session, Model: meta.Model, Tier: meta.Tier,
 				KeyID: meta.KeyID, Channel: meta.Channel, Anonymous: meta.Anonymous, Proxy: meta.Proxy,
 				Attempts: meta.Attempts, Status: status, DurationMS: max(duration.Milliseconds(), 0),
 				Success: success,
@@ -449,6 +458,7 @@ func (m *Monitor) Snapshot() MonitorSnapshot {
 			addTokenCounts(&usageWindow.Tokens, bucket.tokens)
 			mergeTokenMaps(usageWindow.Models, bucket.usageModels)
 			mergeTokenMaps(usageWindow.Tiers, bucket.usageTiers)
+			mergeTokenMaps(usageWindow.Sessions, bucket.usageSessions)
 		}
 		attemptBucket := &m.attemptBuckets[minute%60]
 		if attemptBucket.minute == minute {
@@ -495,7 +505,7 @@ func mergeCounts(target, source map[string]uint64) {
 }
 
 func newUsagePeriod() UsagePeriod {
-	return UsagePeriod{Models: make(map[string]TokenCounts), Tiers: make(map[string]TokenCounts)}
+	return UsagePeriod{Models: make(map[string]TokenCounts), Tiers: make(map[string]TokenCounts), Sessions: make(map[string]TokenCounts)}
 }
 
 func tokenCounts(usage protocol.Usage) TokenCounts {
@@ -533,6 +543,7 @@ func cloneUsagePeriod(source UsagePeriod) UsagePeriod {
 	result.Requests, result.Reported, result.Tokens = source.Requests, source.Reported, source.Tokens
 	mergeTokenMaps(result.Models, source.Models)
 	mergeTokenMaps(result.Tiers, source.Tiers)
+	mergeTokenMaps(result.Sessions, source.Sessions)
 	return result
 }
 

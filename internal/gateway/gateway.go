@@ -158,6 +158,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		ids := identity.DeriveRequestIDs(r, payload)
 		if meta != nil {
 			meta.Request = ids.Request
+			meta.Session = ids.Session
 		}
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
@@ -384,6 +385,7 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	ids := identity.DeriveRequestIDs(r, payload)
 	if meta != nil {
 		meta.Request = ids.Request
+		meta.Session = ids.Session
 	}
 	requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()
