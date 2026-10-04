@@ -97,6 +97,22 @@ func TestZeroDeliveryReplayEndToEnd(t *testing.T) {
 	}
 }
 
+// TestZeroDeliveryDoubleResetEmitsErrorFrame covers the maintainer-reported
+// hang: the first attempt resets before delivery (error frame suppressed),
+// the replay returns 200 but resets before delivery too. No second replay
+// is attempted; the client must get a terminal error frame, not an idle
+// hang on headers-sent-but-silent.
+func TestZeroDeliveryDoubleResetEmitsErrorFrame(t *testing.T) {
+	gw, monitor, n := replayFixture(t, []replayHit{{status: 200}, {status: 200}})
+	raw := driveInference(t, gw, monitor, "mimo-v2.5-free")
+	if *n != 2 {
+		t.Fatalf("expected first reset + one replay = 2 upstream hits, got %d (body %q)", *n, raw)
+	}
+	if !strings.Contains(raw, "upstream_error") {
+		t.Fatalf("double reset must emit an error frame, got %q", raw)
+	}
+}
+
 // TestZeroDeliveryReplayFailureEmitsErrorFrame covers the else branch: the
 // first attempt resets before delivery (error frame suppressed), the replay
 // comes back non-2xx, so the gateway must emit the error frame now rather

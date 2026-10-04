@@ -240,6 +240,19 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 						meta.Tier = string(upstreamRoute.Tier)
 						meta.Protocol = upstreamRoute.Protocol
 					}
+					// ponytail: the replay itself reset before delivery.
+					// No second replay: emit the error frame now so the
+					// client gets a terminal event instead of an idle
+					// hang on headers-sent-but-silent. Any other replay
+					// error already carries its own terminal frame (or a
+					// length rescue), so only this path needs the emit.
+					if errors.Is(err, wire.ErrZeroDeliveryReset) && !wire.ClientCanceled(r.Context(), err) {
+						g.logger.Warn("zero-delivery replay reset again; emitting error frame", "component", "stream", "event", "stream_zero_replay_double_reset", "request_id", ids.Request, "model", model, "error", err)
+						err = fmt.Errorf("upstream reset the replayed stream before delivery: %w", err)
+						if emitErr := wire.EmitStreamError(w, external, model, err); emitErr != nil {
+							err = emitErr
+						}
+					}
 				} else {
 					// ponytail: replay failed or non-2xx. The first
 					// attempt's error frame was suppressed, so emit

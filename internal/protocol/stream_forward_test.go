@@ -188,19 +188,58 @@ func TestTranscodeStreamPartialResetRescuesAsLength(t *testing.T) {
 	}
 }
 
-func TestTranscodeStreamUsageOnlyResetStillReplays(t *testing.T) {
-	// Lane asymmetry, documented: usage metadata alone does not count as
-	// delivery on the transcode lane (Delivered tracks text/reasoning/tool
-	// content, and the usage event emits no downstream frame). A reset here
-	// still replays; the gateway-held usage from the first attempt is
+func TestTranscodeStreamStartOnlyResetDoesNotReplay(t *testing.T) {
+	// The exact maintainer-reported shape: upstream sends only the start
+	// signal (id, no content yet), then the connection dies. The client
+	// already received message_start, so this must NOT replay.
+	rec := httptest.NewRecorder()
+	startOnly := "data: {\"id\":\"r1\",\"model\":\"m\"}\n\n"
+	_, _, outcome, err := TranscodeStream(t.Context(), rec, &resetReader{body: startOnly}, Chat, Anthropic, "big-pickle")
+	if errors.Is(err, ErrZeroDeliveryReset) {
+		t.Fatalf("start-only reset must not signal replay (client holds an open turn)")
+	}
+	if err == nil {
+		t.Fatalf("expected torn-stream error after opening frame")
+	}
+	if !outcome.Delivered {
+		t.Fatalf("start-only outcome must claim delivery")
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "message_start") {
+		t.Fatalf("opening frame must reach downstream, got %q", body)
+	}
+}
+
+func TestTranscodeStreamIdlessUsageOnlyResetStillReplays(t *testing.T) {
+	// A Chat usage frame without an id carries no start signal: only a
+	// usage event is parsed, no downstream frame is emitted, and the reset
+	// still replays. The gateway-held usage from the first attempt is
 	// overwritten by the replay's, so nothing double-reports.
+	rec := httptest.NewRecorder()
+	usageOnly := "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n"
+	_, _, outcome, err := TranscodeStream(t.Context(), rec, &resetReader{body: usageOnly}, Chat, Anthropic, "big-pickle")
+	if !errors.Is(err, ErrZeroDeliveryReset) {
+		t.Fatalf("idless usage-only transcode reset must signal replay, got %v", err)
+	}
+	if outcome.Delivered {
+		t.Fatalf("idless usage-only outcome must not claim delivery")
+	}
+}
+
+func TestTranscodeStreamStartEmittingUsageResetDoesNotReplay(t *testing.T) {
+	// A usage frame that also carries an id emits the downstream opening
+	// frame (message_start on the Anthropic lane) before the reset: the
+	// client holds an open turn, so replaying would emit a second opening
+	// frame and violate the stream. The error-frame path applies instead.
 	rec := httptest.NewRecorder()
 	usageOnly := "data: {\"id\":\"r1\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n"
 	_, _, outcome, err := TranscodeStream(t.Context(), rec, &resetReader{body: usageOnly}, Chat, Anthropic, "big-pickle")
-	if !errors.Is(err, ErrZeroDeliveryReset) {
-		t.Fatalf("usage-only transcode reset must signal replay, got %v", err)
+	if errors.Is(err, ErrZeroDeliveryReset) {
+		t.Fatalf("start-emitting reset must not signal replay")
 	}
-	if outcome.Delivered {
-		t.Fatalf("usage-only outcome must not claim delivery")
+	if err == nil {
+		t.Fatalf("expected torn-stream error after opening frame")
+	}
+	if !outcome.Delivered {
+		t.Fatalf("start-emitting outcome must claim delivery")
 	}
 }
