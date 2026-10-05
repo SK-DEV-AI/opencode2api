@@ -95,12 +95,16 @@ type PerformanceConfig struct {
 	AttemptTimeoutSeconds  int `json:"attempt_timeout_seconds"`
 }
 
-// AttemptTimeout bounds how long a single upstream attempt may wait for
-// response headers before it is abandoned and the next node is tried. Values
-// <= 0 keep the historical behavior of using the request-level retry timeout,
-// so existing configs are unaffected. The result never exceeds requestTimeout,
-// and only the header wait is bounded: an established stream keeps flowing
-// under the request-level timeout.
+// AttemptTimeout bounds how long a single upstream attempt may take to get
+// its request upstream and see response headers before it is abandoned and
+// the next node is tried. Values <= 0 keep the historical behavior of using
+// the request-level retry timeout, so existing configs are unaffected. The
+// result never exceeds requestTimeout. It covers two phases: each body Read
+// while uploading the request (the transport's ResponseHeaderTimeout only
+// starts after the full body is written, so an unwatched upload would burn
+// the whole budget inside one attempt), plus the header wait itself. Once
+// headers arrive, an established stream keeps flowing under the request-level
+// timeout.
 //
 // The bound is installed on the shared transports, so it covers every attempt
 // in both the anonymous and the authenticated loops. Without it, one hung exit

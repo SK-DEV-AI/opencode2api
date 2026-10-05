@@ -298,7 +298,7 @@ Comment markers are `#`, `;`, and `//` at the start of a line or after whitespac
 | --------------------------------------- | ------- | ------------------------------------------------------ |
 | `retry.max_attempts`                    | `3`     | Attempts per authenticated tier, including the first.  |
 | `retry.timeout_seconds`                 | `300`   | Total inference timeout, including stream consumption. |
-| `performance.attempt_timeout_seconds`   | `0`     | Header wait per attempt; 0 uses the request timeout.   |
+| `performance.attempt_timeout_seconds`   | `0`     | Per-Read upload + header wait per attempt; 0 uses the request timeout. |
 | `performance.connect_timeout_seconds`   | `5`     | Connection establishment timeout.                      |
 | `performance.failure_cooldown_seconds`  | `15`    | Base failure cooldown.                                 |
 | `performance.max_idle_conns`            | `2048`  | Idle connection limit per proxy transport.             |

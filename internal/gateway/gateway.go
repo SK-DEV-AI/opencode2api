@@ -177,6 +177,15 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				wire.WriteError(w, external, http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout", ids.Request)
 				return
 			}
+			// A downstream disconnect is not an upstream failure: report the
+			// real cause so telemetry and clients see a cancel, not a 502.
+			if wire.ClientCanceled(r.Context(), err) {
+				if meta != nil {
+					meta.Outcome = "client_canceled"
+				}
+				wire.WriteError(w, external, 499, "client closed request", "client_canceled", ids.Request)
+				return
+			}
 			wire.WriteError(w, external, http.StatusBadGateway, "all upstream attempts failed", "upstream_error", ids.Request)
 			return
 		}
@@ -399,6 +408,13 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 		g.logger.Warn("all upstream attempts failed", "component", "upstream", "event", "request_failed", "request_id", ids.Request, "tier", finalTier, "key_id", keyID, "channel", channel, "anonymous", anonymous, "error", err)
 		if errors.Is(err, context.DeadlineExceeded) {
 			wire.WriteError(w, wire.SystemOne, http.StatusGatewayTimeout, "upstream request timed out", "upstream_timeout", ids.Request)
+			return
+		}
+		if wire.ClientCanceled(r.Context(), err) {
+			if meta != nil {
+				meta.Outcome = "client_canceled"
+			}
+			wire.WriteError(w, wire.SystemOne, 499, "client closed request", "client_canceled", ids.Request)
 			return
 		}
 		wire.WriteError(w, wire.SystemOne, http.StatusBadGateway, "all upstream attempts failed", "upstream_error", ids.Request)

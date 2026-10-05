@@ -22,11 +22,16 @@ import (
 )
 
 type proxyTransport struct {
-	index    int
-	name     string
-	client   *http.Client
-	healthy  atomic.Bool
-	checking atomic.Bool
+	index  int
+	name   string
+	client *http.Client
+	// uploadTimeout bounds each body Read while client.Do sends the request
+	// upstream. The transport's ResponseHeaderTimeout only starts after the
+	// full body is written, so without this a stalled upload burns the
+	// whole request budget inside one attempt.
+	uploadTimeout time.Duration
+	healthy       atomic.Bool
+	checking      atomic.Bool
 }
 
 type transportPool struct {
@@ -173,7 +178,7 @@ func newTransportPool(proxies []string, cfg config.PerformanceConfig, responseHe
 			}
 			transport.Proxy = http.ProxyURL(u)
 		}
-		proxy := &proxyTransport{index: len(p.items), name: raw, client: &http.Client{Transport: transport}}
+		proxy := &proxyTransport{index: len(p.items), name: raw, client: &http.Client{Transport: transport}, uploadTimeout: responseHeaderTimeout}
 		proxy.healthy.Store(true)
 		p.items = append(p.items, proxy)
 	}
