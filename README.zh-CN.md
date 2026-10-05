@@ -293,7 +293,7 @@ direct
 | --------------------------------------- | ------ | ------------------------------------------------ |
 | `retry.max_attempts`                    | `3`    | 每个认证 Tier 的尝试次数，包含首次请求。         |
 | `retry.timeout_seconds`                 | `300`  | 推理请求总超时，包含流式响应读取。               |
-| `performance.attempt_timeout_seconds`   | `0`    | 每次尝试上传单次读取＋等待响应头的超时；0 表示使用请求总超时。 |
+| `performance.attempt_timeout_seconds`   | `0`    | 每次尝试等待响应头的超时；0 表示使用请求总超时。 |
 | `performance.connect_timeout_seconds`   | `5`    | 建立连接的超时。                                 |
 | `performance.failure_cooldown_seconds`  | `15`   | 失败冷却基数。                                   |
 | `performance.max_idle_conns`            | `2048` | 每个代理 Transport 的空闲连接上限。              |

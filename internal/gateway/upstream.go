@@ -297,7 +297,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			httpx.DrainAndClose(lastResponse.Body)
 			lastResponse = nil
 		}
-		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Zen, route.Protocol, body, ids, anonymousZenKey, node.proxy.uploadTimeout)
+		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Zen, route.Protocol, body, ids, anonymousZenKey)
 		if err != nil {
 			return nil, err, attempts
 		}
@@ -574,7 +574,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	}
 	keyID := config.KeyDisplayID(node.key)
 	setRequestCredential(ctx, override.Tier, keyID, "key", false, proxy)
-	req, err := newUpstreamRequest(ctx, baseURL, route.ProtocolFor(override.Tier), body, ids, node.key, proxy.uploadTimeout)
+	req, err := newUpstreamRequest(ctx, baseURL, route.ProtocolFor(override.Tier), body, ids, node.key)
 	if err != nil {
 		return nil, err, 0
 	}
@@ -641,7 +641,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			lastErr = errors.New("upstream key has no proxy binding")
 			break
 		}
-		req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key, proxy.uploadTimeout)
+		req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key)
 		if err != nil {
 			return nil, err, attempts
 		}
@@ -796,12 +796,11 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 	})
 }
 
-func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string, uploadTimeout time.Duration) (*http.Request, error) {
+func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + wire.Path(protocol)
-	// Bound each body Read while the transport sends the request: the
-	// transport's ResponseHeaderTimeout only starts after the full body is
-	// written, so an unwatched upload can burn the whole request budget.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, httpx.WatchdogReader(bytes.NewReader(body), uploadTimeout))
+	// Keep the body a *bytes.Reader so NewRequest sets ContentLength: a
+	// known length avoids chunked upload encoding upstream.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
