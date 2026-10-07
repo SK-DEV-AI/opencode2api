@@ -16,6 +16,11 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 - Dynamic model discovery, native protocol metadata, and disk caches.
 - A separate management port with configuration editing, a Playground, diagnostics, token statistics, and live logs.
 - Configuration hot reload with validation before switching new requests to a replacement gateway.
+- Go subscription quota dashboard with remaining percentages, reset times, and available models.
+- Local API key creation, naming, enabling, disabling, and deletion with immediate updates.
+- Sticky `sota` / `sweet` model groups with ordering, failure fallback, streaming protection, and persisted state.
+
+See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
 
 ## Quick start
 
@@ -191,14 +196,14 @@ The gateway refreshes Zen/Go `/v1/models` and OpenCode's [capability catalog](ht
 
 Allowed protocol values are `chat`, `responses`, and `anthropic`. Models using unsupported native protocols are filtered from discovery unless overridden.
 
-Cost and deprecation metadata come from [models.dev](https://models.dev/api.json), refreshed every 24 hours. Metadata requests use a 30-second timeout per HTTP client. Refresh failures retain existing data.
+Cost, deprecation, and model limits come from the official [OpenCode metadata endpoint](https://models.opencode.ai/api.json), refreshed every 24 hours. OpenCode's capability catalog remains authoritative for context and token limits; metadata `limit.context`, `limit.input`, and `limit.output` fill fields missing from that catalog. These limits are exposed by `/v1/models` as `context_window`/`context_length`, `max_input`, and `max_output` for discovery clients such as CLIProxyAPI and Pi. Metadata requests use a 30-second timeout per HTTP client. Refresh failures retain existing data.
 
 ### Anonymous access and fallback
 
 With `anonymous: true`, either condition makes a model eligible for the anonymous Zen lane:
 
 - Its ID contains `free`, case-insensitively.
-- models.dev reports zero input and output cost and the model is not deprecated.
+- OpenCode metadata reports zero input and output cost and the model is not deprecated.
 
 Eligibility is a routing decision; the upstream can still reject or rate-limit the request. Anonymous requests use `public` in the upstream authentication header.
 
@@ -210,9 +215,19 @@ The routing sequence is:
 
 Anonymous attempts are not cut short by `retry.max_attempts`, but all attempts share the request timeout. Network errors, authentication failures, rate limits, and server errors can rotate keys. Other 4xx responses end the current tier; another available tier may still be tried.
 
-Requests are encoded for each tier's own protocol. Once a stream has started, the gateway does not retry generation on another node, except when the upstream resets before anything reached downstream (the turn is replayed once inside the same connection). A recognized stale Responses reasoning reference can trigger one repair pass; selected-key diagnostics never use that replay.
+Requests are encoded for each tier's own protocol. With `performance.first_event_timeout_seconds` enabled, a successful SSE response is held until the first complete data event. A timeout or disconnect before that event uses the existing key/proxy retry budget; comments do not satisfy the timeout. Once released downstream, the stream is not retried pre-delivery, except when the upstream resets before anything reached downstream (the turn is replayed once inside the same connection). The default is `0` (disabled); try `15` seconds for upstreams that accept requests but send no events. This bounds the first event, not the first text token, and does not apply to System One. Rotation aliases use their separate `rotation.first_output_seconds` timeout. A recognized stale Responses reasoning reference can trigger one repair pass; selected-key diagnostics never use that replay.
 
 When only anonymous access is configured, `/v1/models` exposes only models eligible for that lane.
+
+### Free model availability
+
+The gateway probes models whose IDs contain `free` (case-insensitive), or whose metadata reports zero input/output cost without deprecation, with a short streaming inference request. It tries the enabled anonymous lane first and then one configured Zen Key. A valid completed response on either lane keeps the model enabled; if every attempted lane fails, the model is disabled in discovery and routing. Probe traffic does not alter production key/proxy cooldowns or request statistics. It still reaches the upstream and may consume its free allowance.
+
+The intervals are fixed: enabled models are checked every **1 hour**, failed models every **24 hours**. A successful recheck restores the model automatically. The WebUI **Free model availability** page can restore it immediately, with its next check one hour later. An in-flight probe cannot undo a manual restore. Models without a usable Zen/anonymous lane, or without a supported inference protocol, are skipped.
+
+State survives restarts in `config.json.<upstream-fingerprint>.availability.json`, separated by the Zen upstream URL. The background scheduler checks for due models once per minute and probes sequentially, with a 60-second timeout per lane. No channels available means no automatic disable.
+
+Administration endpoints (login required; restore also requires CSRF): `GET /api/models/availability` and `POST /api/models/restore` with `{"model":"MODEL_ID"}`.
 
 ### Sessions and proxies
 
@@ -466,3 +481,9 @@ npm run check:web
 ## Acknowledgements
 
 Thanks to the [LINUX DO](https://linux.do) community for its support.
+
+## License
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+This project is free software: you may redistribute and modify it under the GNU General Public License as published by the Free Software Foundation, either version 3 or (at your option) any later version. It is distributed without any warranty. See [LICENSE](LICENSE) for the full terms.

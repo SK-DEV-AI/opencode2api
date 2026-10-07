@@ -46,7 +46,7 @@ type bridgeStreamEvent struct {
 	Usage      *Usage
 }
 
-// StreamOutcome carries the terminal state of a transcoded stream for the
+// StreamOutcome carries the terminal state of a streamed turn for the
 // request log: stop reason plus the tail already sent downstream.
 type StreamOutcome struct {
 	Stop string
