@@ -97,15 +97,11 @@ type PerformanceConfig struct {
 
 // AttemptTimeout bounds how long a single upstream attempt may wait for
 // response headers before it is abandoned and the next node is tried. Values
-// <= 0 keep the historical behavior of using the request-level retry timeout,
-// so existing configs are unaffected. The result never exceeds requestTimeout,
-// and only the header wait is bounded: an established stream keeps flowing
-// under the request-level timeout.
-//
-// The bound is installed on the shared transports, so it covers every attempt
-// in both the anonymous and the authenticated loops. Without it, one hung exit
-// can consume the entire request budget by itself, and the attempts that follow
-// are fired against an already-expired context.
+// <= 0 keep a tight 20s fail-fast default: the gateway now hedges every
+// request across all healthy lanes in parallel and takes the first success,
+// so one stuck connection must never consume the whole request budget.
+// The bound never exceeds requestTimeout, and only the header wait is
+// bounded: an established stream keeps flowing under requestTimeout.
 func (cfg PerformanceConfig) AttemptTimeout(requestTimeout time.Duration) time.Duration {
 	if cfg.AttemptTimeoutSeconds > 0 {
 		attempt := time.Duration(cfg.AttemptTimeoutSeconds) * time.Second
@@ -113,6 +109,9 @@ func (cfg PerformanceConfig) AttemptTimeout(requestTimeout time.Duration) time.D
 			return requestTimeout
 		}
 		return attempt
+	}
+	if requestTimeout <= 0 || requestTimeout > 20*time.Second {
+		return 20 * time.Second
 	}
 	return requestTimeout
 }
@@ -131,7 +130,7 @@ func Load(path string) (Config, error) {
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
-		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
+		Performance: PerformanceConfig{MaxIdleConns: 4096, MaxIdleConnsPerHost: 512, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 3, FailureCooldownSeconds: 5},
 		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
 		WebUI:       WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
 		Prefer:      TierGo,
