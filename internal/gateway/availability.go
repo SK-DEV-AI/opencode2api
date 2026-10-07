@@ -129,7 +129,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) (success boo
 		}
 		attempted, channel = true, lane.name
 		probeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		req, err := newUpstreamRequest(probeCtx, g.cfg.Upstream.Zen, protocol, b, identity.RequestIDs{Session: "availability:" + model}, lane.key)
+		req, err := newUpstreamRequest(probeCtx, g.cfg.Upstream.Zen, protocol, b, identity.RequestIDs{Session: identity.CanonicalSessionID("availability:" + model)}, lane.key)
 		if err == nil {
 			// Probe traffic never updates production key/proxy cooldowns or usage.
 			var resp *http.Response
