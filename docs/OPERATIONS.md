@@ -40,7 +40,7 @@ Audience: future maintainers (human or LLM). Goal: full context in one read.
 
 ## 5. Muse-spark verdict (2026-10-07/08 logs — model-side, NOT proxy)
 
-- "Loads forever" = thinking + 160-200K context. Legs `anon:200:3-9s` (headers fast); `duration_ms ~184s outcome=client_canceled` (jcode gave up first, proxy was still streaming); one turn `in=206673 out=11993 reasoning=11835`. Small-context muse = fast (user-confirmed). xhigh multiplies thinking time; high is the sane default.
+- "Loads forever" = thinking + 160-200K context. Legs usually `anon:200:3-9s` (headers fast); `duration_ms ~184s outcome=client_canceled` (jcode gave up first, proxy was still streaming); one turn `in=206673 out=11993 reasoning=11835`. Headers are not ALWAYS fast: 2026-10-08 log has one `anon:200:61413ms` cancel (upstream took 61s for headers, still thinking-side slowness, not proxy queueing). Small-context muse = fast (user-confirmed). xhigh multiplies thinking time; high is the sane default.
 - `opencode2api.service: Failed with result 'timeout'` + SIGKILL on restart = expected, not a bug: streams live minutes, `TimeoutStopUSec=10s` < drain time, so every restart SIGKILLs in-flight turns. Gateway is stateless, clients retry. No unit change.
 
 ## 6. Free-suffix naming (NOT a proxy bug)
