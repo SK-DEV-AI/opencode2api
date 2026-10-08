@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -421,82 +420,6 @@ func (p *nodePool) replacementLocked(failedProxy int, healthyOnly bool) int {
 type nodeCursor struct {
 	pool *nodePool
 	next int
-}
-
-func (p *nodePool) cloneNodes() []*upstreamNode {
-	if p == nil {
-		return nil
-	}
-	p.bindingsMu.Lock()
-	defer p.bindingsMu.Unlock()
-	return append([]*upstreamNode(nil), p.nodes...)
-}
-
-// snapshotNodes returns up to limit nodes from the pool without holding the
-// lock during network I/O. The race fans lanes out from this snapshot, so
-// cursor iteration never runs concurrently with another request's cursor.
-func (p *nodePool) snapshotNodes(affinity string, limit int) []*upstreamNode {
-	nodes := p.cloneNodes()
-	if len(nodes) == 0 {
-		return nil
-	}
-	start := 0
-	if affinity != "" {
-		hash := fnv.New64a()
-		_, _ = hash.Write([]byte(affinity))
-		start = int(hash.Sum64() % uint64(len(nodes)))
-	} else if limit > 0 {
-		start = int((p.next.Add(1) - 1) % uint64(len(nodes)))
-	}
-	if limit <= 0 || limit > len(nodes) {
-		limit = len(nodes)
-	}
-	out := make([]*upstreamNode, 0, limit)
-	now := time.Now().UnixNano()
-	for offset := 0; offset < len(nodes) && len(out) < limit; offset++ {
-		node := nodes[(start+offset)%len(nodes)]
-		if node.cooldownUntil.Load() <= now {
-			out = append(out, node)
-		}
-	}
-	// No cooled node available: race the soonest-waking ones instead of
-	// serial-falling back to a single wait.
-	if len(out) == 0 {
-		ordered := append([]*upstreamNode(nil), nodes...)
-		sort.Slice(ordered, func(i, j int) bool {
-			return ordered[i].cooldownUntil.Load() < ordered[j].cooldownUntil.Load()
-		})
-		if limit > len(ordered) {
-			limit = len(ordered)
-		}
-		return ordered[:limit]
-	}
-	return out
-}
-
-// snapshotNodes returns up to limit proxies from the anonymous pool without
-// sharing cursor state across goroutines.
-func (p *anonymousPool) snapshotNodes(limit int) []*anonymousNode {
-	if p == nil {
-		return nil
-	}
-	n := len(p.nodes)
-	if n == 0 {
-		return nil
-	}
-	start := int((p.next.Add(1) - 1) % uint64(n))
-	if limit <= 0 || limit > n {
-		limit = n
-	}
-	out := make([]*anonymousNode, 0, limit)
-	now := time.Now().UnixNano()
-	for offset := 0; offset < n && len(out) < limit; offset++ {
-		node := p.nodes[(start+offset)%n]
-		if node.proxy.healthy.Load() && node.cooldownUntil.Load() <= now {
-			out = append(out, node)
-		}
-	}
-	return out
 }
 
 // Cursor reserves a different starting node for each concurrent request.

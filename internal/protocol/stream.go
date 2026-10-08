@@ -9,6 +9,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 var errStreamUpstreamFailure = errors.New("upstream stream failure delivered")
@@ -86,7 +89,14 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 	}
 	emitter := newBridgeStreamEmitter(w, flusher, to, model)
 	termination := streamOpen
+	// heartbeat keeps jcode's idle timer alive during silent thinking on
+	// the transcode lane too: upstream comments never reach readSSE's
+	// handler, so without this an xhigh turn that emits no data frames for
+	// minutes looks like a dead connection downstream.
+	heartbeat := newStreamHeartbeat(w, flusher)
+	defer heartbeat.stop()
 	readErr := readSSE(reader, func(eventName, data string) error {
+		heartbeat.stop()
 		events, err := parser.Parse(eventName, data)
 		if err != nil {
 			termination = streamErrorTermination
@@ -196,6 +206,60 @@ type sseFlushWriter struct {
 	flusher http.Flusher
 }
 
+// streamHeartbeat emits SSE comments during upstream silence so downstream
+// idle timers (jcode: 180s base, ×3 for xhigh) never fire while the model is
+// legitimately thinking. Any forwarded byte — upstream data or our own
+// comment — resets the timer; the heartbeat stops permanently once upstream
+// delivers its first frame, so it can never interleave with real content.
+type streamHeartbeat struct {
+	writer  io.Writer
+	flusher http.Flusher
+	timer   *time.Timer
+	done    chan struct{}
+	once    sync.Once
+	stopped atomic.Bool
+}
+
+func newStreamHeartbeat(w io.Writer, flusher http.Flusher) *streamHeartbeat {
+	hb := &streamHeartbeat{writer: w, flusher: flusher, done: make(chan struct{})}
+	hb.timer = time.AfterFunc(streamHeartbeatInterval, hb.tick)
+	return hb
+}
+
+const streamHeartbeatInterval = 15 * time.Second
+
+func (hb *streamHeartbeat) Write(data []byte) (int, error) {
+	// Any upstream byte means the stream is alive: silence the heartbeat.
+	hb.stop()
+	return len(data), nil
+}
+
+func (hb *streamHeartbeat) tick() {
+	if hb.stopped.Load() {
+		return
+	}
+	select {
+	case <-hb.done:
+		return
+	default:
+	}
+	if _, err := io.WriteString(hb.writer, ": keepalive\n\n"); err != nil {
+		return
+	}
+	hb.flusher.Flush()
+	if !hb.stopped.Load() {
+		hb.timer.Reset(streamHeartbeatInterval)
+	}
+}
+
+func (hb *streamHeartbeat) stop() {
+	hb.once.Do(func() {
+		hb.stopped.Store(true)
+		hb.timer.Stop()
+		close(hb.done)
+	})
+}
+
 func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	n, err := writer.writer.Write(data)
 	if n > 0 {
@@ -210,12 +274,19 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 		return Usage{}, false, StreamOutcome{}, fmt.Errorf("response writer does not support streaming")
 	}
 	observer := newStreamUsageObserver(protocol)
+	// heartbeat keeps downstream idle timers alive while upstream thinks
+	// silently: if no bytes flow either direction for the interval, emit an
+	// SSE comment (a keepalive every SSE client ignores as data but counts
+	// as activity). Stops at the first forwarded frame.
+	heartbeat := newStreamHeartbeat(w, flusher)
+	defer heartbeat.stop()
 	// ponytail: the observer already parses every SSE frame for usage, so it
 	// is also the delivery signal. A reset before any data frame reached
 	// downstream (idle connection, keepalives only, preamble without data)
 	// is safe to replay: the client saw nothing actionable. Anything with
 	// data frames keeps the old error-frame path.
-	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
+	_, copyErr := io.Copy(io.MultiWriter(&sseFlushWriter{writer: w, flusher: flusher}, heartbeat), io.TeeReader(reader, observer))
+	heartbeat.stop()
 	usage := observer.Finish()
 	// ponytail: passthrough stop/tail census. Same-protocol streams are the
 	// common case, yet the request log showed an empty stop for all of them

@@ -57,14 +57,8 @@ func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map
 	return g.doUpstreamWithOffset(ctx, route, bodies, ids, 0)
 }
 
-var errRaceFallback = errors.New("race setup incomplete")
-
 func (g *Gateway) doUpstreamWithOffset(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, models.Route, int, error) {
-	resp, effectiveRoute, attempts, err := g.doUpstreamRace(ctx, route, bodies, ids, attemptOffset)
-	if !errors.Is(err, errRaceFallback) {
-		return resp, effectiveRoute, attempts, err
-	}
-	resp, effectiveRoute, attempts, err = g.doUpstreamTiers(ctx, route, bodies, ids, attemptOffset)
+	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, attemptOffset)
 	if _, selected := debugKeyOverrideFrom(ctx); selected {
 		return resp, effectiveRoute, attempts, err
 	}
@@ -197,190 +191,6 @@ func stripStaleReasoningInputs(route models.Route, bodies map[config.Tier][]byte
 		changed = true
 	}
 	return out, changed
-}
-
-// raceResult is one finished upstream lane in the hedged parallel race.
-type raceResult struct {
-	resp      *http.Response
-	route     models.Route
-	keyID     string
-	channel   string
-	anonymous bool
-	proxy     *proxyTransport
-	node      *upstreamNode
-	anonNode  *anonymousNode
-	duration  time.Duration
-	err       error
-}
-
-func drainRaceLosers(results <-chan raceResult, remaining int) {
-	for i := 0; i < remaining; i++ {
-		result := <-results
-		if result.resp != nil && result.resp.Body != nil {
-			httpx.DrainAndClose(result.resp.Body)
-		}
-	}
-}
-
-func upstreamStatus(resp *http.Response) int {
-	if resp == nil {
-		return 0
-	}
-	return resp.StatusCode
-}
-
-func (g *Gateway) poolForTier(tier config.Tier) *nodePool {
-	switch tier {
-	case config.TierGo:
-		return g.goNodes
-	default:
-		return g.zenNodes
-	}
-}
-
-func (g *Gateway) doUpstreamRace(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, models.Route, int, error) {
-	if _, selected := debugKeyOverrideFrom(ctx); selected {
-		return nil, route, attemptOffset, errRaceFallback
-	}
-	type lane struct {
-		tier      config.Tier
-		key       string
-		keyID     string
-		channel   string
-		anonymous bool
-		body      []byte
-		protocol  wire.Protocol
-		proxy     *proxyTransport
-		node      *upstreamNode
-		anonNode  *anonymousNode
-	}
-	var lanes []lane
-	if route.Anonymous {
-		body, ok := bodies[config.TierZen]
-		if ok && len(body) > 0 && g.anonymous != nil {
-			shaped := prepareAnonymousBody(body, route.ProtocolFor(config.TierZen))
-			protocol := route.ProtocolFor(config.TierZen)
-			seen := map[*proxyTransport]bool{}
-			for _, node := range g.anonymous.snapshotNodes(0) {
-				if node == nil || node.proxy == nil || seen[node.proxy] {
-					continue
-				}
-				seen[node.proxy] = true
-				lanes = append(lanes, lane{tier: config.TierZen, key: anonymousZenKey, keyID: anonymousZenKey, channel: "anonymous", anonymous: true, body: shaped, protocol: protocol, proxy: node.proxy, anonNode: node})
-			}
-		}
-	}
-	for _, tier := range route.KeyTiers {
-		nodes := g.zenNodes
-		if tier == config.TierGo {
-			nodes = g.goNodes
-		}
-		if nodes == nil || nodes.Len() == 0 {
-			continue
-		}
-		body, ok := bodies[tier]
-		if !ok || len(body) == 0 {
-			continue
-		}
-		shaped, _ := g.shapeKeyBody(body, route, tier)
-		protocol := route.ProtocolFor(tier)
-		seen := map[*upstreamNode]bool{}
-		for _, node := range nodes.snapshotNodes(ids.Session, 0) {
-			if node == nil || seen[node] {
-				continue
-			}
-			seen[node] = true
-			proxy := nodes.Proxy(node)
-			if proxy == nil || !proxy.healthy.Load() {
-				continue
-			}
-			lanes = append(lanes, lane{tier: tier, key: node.key, keyID: config.KeyDisplayID(node.key), channel: string(tier), body: shaped, protocol: protocol, proxy: proxy, node: node})
-		}
-	}
-	if len(lanes) <= 1 {
-		return nil, route, attemptOffset, errRaceFallback
-	}
-	baseFor := func(tier config.Tier) string {
-		if tier == config.TierGo {
-			return g.cfg.Upstream.Go
-		}
-		return g.cfg.Upstream.Zen
-	}
-	firstEventTimeout := time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds) * time.Second
-	results := make(chan raceResult, len(lanes))
-	for _, candidate := range lanes {
-		go func(candidate lane) {
-			started := time.Now()
-			req, err := newUpstreamRequest(ctx, baseFor(candidate.tier), candidate.protocol, candidate.body, ids, candidate.key)
-			var resp *http.Response
-			if err == nil {
-				resp, err = doInferenceAttempt(candidate.proxy.client, req, firstEventTimeout)
-			}
-			results <- raceResult{resp: resp, route: models.Route{ID: route.ID, Tier: candidate.tier, Protocol: candidate.protocol, Protocols: route.Protocols, Anonymous: candidate.anonymous, KeyTiers: route.KeyTiers}, keyID: candidate.keyID, channel: candidate.channel, anonymous: candidate.anonymous, proxy: candidate.proxy, node: candidate.node, anonNode: candidate.anonNode, duration: time.Since(started), err: err}
-		}(candidate)
-	}
-	attempts := attemptOffset
-	var firstRetryable *raceResult
-	var firstRejected *raceResult
-	remaining := len(lanes)
-	for remaining > 0 {
-		var result raceResult
-		select {
-		case <-ctx.Done():
-			go drainRaceLosers(results, remaining)
-			if firstRetryable != nil {
-				if firstRetryable.resp != nil {
-					return firstRetryable.resp, firstRetryable.route, attempts, nil
-				}
-				return nil, route, attempts, firstRetryable.err
-			}
-			return nil, route, attempts, ctx.Err()
-		case result = <-results:
-			remaining--
-		}
-		attempts++
-		g.recordUpstreamAttempt(ctx, result.route, ids, attempts, result.keyID, result.channel, result.anonymous, result.proxy, result.resp, result.err, result.duration)
-		if result.err == nil && result.resp != nil && result.resp.StatusCode/100 == 2 {
-			if result.node != nil {
-				g.observeKeyResult(ctx, g.poolForTier(result.route.Tier), result.node, result.proxy, result.resp, nil)
-			}
-			if result.anonNode != nil {
-				g.observeAnonymousResult(ctx, result.anonNode, result.resp, nil)
-			}
-			go drainRaceLosers(results, remaining)
-			return result.resp, result.route, attempts, nil
-		}
-		if result.node != nil {
-			g.observeKeyResult(ctx, g.poolForTier(result.route.Tier), result.node, result.proxy, result.resp, result.err)
-		}
-		if result.anonNode != nil {
-			g.observeAnonymousResult(ctx, result.anonNode, result.resp, nil)
-		}
-		if result.resp != nil {
-			httpx.DrainAndClose(result.resp.Body)
-		}
-		if result.err == nil && result.resp != nil && isNonRetryableClientResponse(result.resp, nil) {
-			if firstRejected == nil {
-				rejectedCopy := result
-				firstRejected = &rejectedCopy
-			}
-			continue
-		}
-		if firstRetryable == nil {
-			retryableCopy := result
-			firstRetryable = &retryableCopy
-		}
-	}
-	if firstRejected != nil {
-		return firstRejected.resp, firstRejected.route, attempts, nil
-	}
-	if firstRetryable != nil {
-		if firstRetryable.resp != nil {
-			return firstRetryable.resp, firstRetryable.route, attempts, nil
-		}
-		return nil, route, attempts, firstRetryable.err
-	}
-	return nil, route, attempts, errors.New("no healthy upstream nodes available")
 }
 
 func (g *Gateway) doUpstreamTiers(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, models.Route, int, error) {
@@ -910,6 +720,13 @@ func (g *Gateway) observeAnonymousResult(ctx context.Context, node *anonymousNod
 	} else {
 		g.anonymous.MarkFailure(node, resp, err)
 	}
+}
+
+func upstreamStatus(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }
 
 func setRequestCredential(ctx context.Context, tier config.Tier, keyID, channel string, anonymous bool, proxy *proxyTransport) {
