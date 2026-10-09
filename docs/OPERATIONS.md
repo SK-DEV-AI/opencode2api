@@ -46,3 +46,11 @@ Audience: future maintainers (human or LLM). Goal: full context in one read.
 ## 6. Free-suffix naming (NOT a proxy bug)
 
 - `-free` is upstream's model-ID naming, not our label. Free-ness = `models.dev` costs `0/0` (`metadata_free`, e.g. `big-pickle`) OR name fallback (`free` in ID). Verified against live `config.json.models.dev.json` (132 entries): `jev-1.13`, `sota`, `sweet` are absent from models.dev AND lack the substring, so the anonymous lane denies them — but they route via the 6 free keys' authenticated lanes and still appear in `/v1/models`. Paid IDs (gpt-5, claude, kimi...) take the same key-lane path on workspace allowance. Nothing to change.
+
+## 7. Finding C — offline boot false-disables free models (commit `2f65507`, KEEP)
+
+- Symptom after laptop boot without network: `model "muse-spark-1.3-contributor-free" is disabled after a failed availability check` on every request; fixed only by `rm config.json.*.availability.json && restart`.
+- Root cause: `startAvailabilityChecks` probes immediately at startup. Offline, every lane fails with `transport_error`, `probeFreeModel` returned `attempted=true success=false`, and `Record` persisted `disabled:true` with a 24h `next_check`. The probe could not distinguish "model dead" from "nobody home".
+- Fix: `probeFreeModel` tracks `gotResponse`. If NO lane produced any HTTP response, it returns `attempted=false` (`no_upstream_contact`), and `checkFreeModels` skips the `Record` entirely — persisted state and `next_check` untouched. A reachable-but-rejecting upstream (503 etc) still records, so genuinely dead models keep being disabled.
+- Tests: `TestProbeOfflineIsUnattempted` (refused connection → unattempted) and `TestProbeHTTPErrorStillRecords` (503 → attempted) in `internal/gateway/availability_test.go`.
+- jcode selector corollary: `handleModels` serves `availableModels()`, which skips disabled models — so an offline boot also shrinks `/v1/models` and jcode's selector loses the `-free` entries until re-discovery. After this fix, boot offline leaves the list intact; if the selector still looks thin, force jcode re-discovery (restart jcode) after confirming `curl /v1/models` lists the model.
