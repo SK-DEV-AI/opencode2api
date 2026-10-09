@@ -24,3 +24,4 @@ coverage.out
 .serena/
 .cqs/
 libonnxruntime_providers_*.so
+.omen/
