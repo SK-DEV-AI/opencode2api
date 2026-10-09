@@ -1,0 +1,16 @@
+# Notes - unified memory for AI collaborators
+# Surprises (prediction errors) worth remembering
+# sentiment: DISCRETE values only: -1, -0.5, 0, 0.5, 1
+#   -1 = serious pain, -0.5 = notable pain, 0 = neutral, 0.5 = notable gain, 1 = major win
+
+[[note]]
+sentiment = 0.0
+text = "deadcode analyzers (omen + cqs) flag Go mux-registered HTTP handlers as dead because method-value references are not call edges; always cross-check with serena find_referencing_symbols before deleting"
+mentions = ["internal/admin/server.go"]
+kind = "known-bug"
+
+[[note]]
+sentiment = 0.0
+text = "omen semantic_search hangs over MCP on cold index build; use CLI (omen search index once, then omen search query)"
+mentions = ["omen-mcp"]
+kind = "known-bug"
