@@ -123,6 +123,10 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) (success boo
 			lanes = append(lanes, lane{node.key, "zen", proxy.client})
 		}
 	}
+	// gotResponse tracks whether ANY lane produced an HTTP response. Without
+	// one the probe observed only the network (offline boot, hotspot drop),
+	// never the model, so the result is inconclusive either way.
+	var gotResponse bool
 	for _, lane := range lanes {
 		if ctx.Err() != nil {
 			return false, "canceled", "", false
@@ -135,6 +139,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) (success boo
 			var resp *http.Response
 			resp, err = lane.client.Do(req)
 			if err == nil {
+				gotResponse = true
 				reason = fmt.Sprintf("http_%d", resp.StatusCode)
 				if resp.StatusCode/100 == 2 {
 					if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
@@ -175,6 +180,13 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) (success boo
 		if success {
 			return true, "probe_succeeded", channel, true
 		}
+	}
+	if !gotResponse {
+		// No lane reached upstream: offline boot, hotspot drop, or DNS down.
+		// The probe learned nothing about the model, so report unattempted
+		// and leave the persisted state (and next_check) untouched instead
+		// of disabling a working model for 24h.
+		return false, "no_upstream_contact", "", false
 	}
 	return success, reason, channel, attempted
 }
