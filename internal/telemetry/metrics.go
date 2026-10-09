@@ -131,19 +131,38 @@ const (
 	monitorRecentOutputLimit     = 500
 )
 
-type upstreamRequestRing struct {
-	items []UpstreamRequest
-	start int
-	count int
+type timedEvent interface {
+	UpstreamRequest | UpstreamAttempt
 }
 
-func newUpstreamRequestRing() upstreamRequestRing {
-	return upstreamRequestRing{items: make([]UpstreamRequest, monitorRecentRequestCapacity)}
+// eventRing is a fixed-capacity FIFO over timestamped monitor events.
+// It replaces the former per-type upstreamRequestRing/upstreamAttemptRing
+// pair, which were exact clones differing only in element type.
+type eventRing[T timedEvent] struct {
+	items    []T
+	start    int
+	count    int
+	capacity int
 }
 
-func (ring *upstreamRequestRing) Add(value UpstreamRequest) {
+func newEventRing[T timedEvent](capacity int) eventRing[T] {
+	return eventRing[T]{items: make([]T, capacity), capacity: capacity}
+}
+
+func eventTime[T timedEvent](value T) time.Time {
+	switch event := any(value).(type) {
+	case UpstreamRequest:
+		return event.Time
+	case UpstreamAttempt:
+		return event.Time
+	default:
+		return time.Time{}
+	}
+}
+
+func (ring *eventRing[T]) Add(value T) {
 	if len(ring.items) == 0 {
-		ring.items = make([]UpstreamRequest, monitorRecentRequestCapacity)
+		ring.items = make([]T, ring.capacity)
 	}
 	index := (ring.start + ring.count) % len(ring.items)
 	if ring.count == len(ring.items) {
@@ -155,22 +174,22 @@ func (ring *upstreamRequestRing) Add(value UpstreamRequest) {
 	ring.count++
 }
 
-func (ring *upstreamRequestRing) PruneBefore(cutoff time.Time) {
-	for ring.count > 0 && ring.items[ring.start].Time.Before(cutoff) {
-		ring.items[ring.start] = UpstreamRequest{}
+func (ring *eventRing[T]) PruneBefore(cutoff time.Time) {
+	for ring.count > 0 && eventTime(ring.items[ring.start]).Before(cutoff) {
+		ring.items[ring.start] = *new(T)
 		ring.start = (ring.start + 1) % len(ring.items)
 		ring.count--
 	}
 }
 
-func (ring *upstreamRequestRing) Snapshot(cutoff time.Time, limit int) []UpstreamRequest {
+func (ring *eventRing[T]) Snapshot(cutoff time.Time, limit int) []T {
 	if limit < 1 || ring.count == 0 {
 		return nil
 	}
-	result := make([]UpstreamRequest, 0, min(ring.count, limit))
+	result := make([]T, 0, min(ring.count, limit))
 	for offset := 0; offset < ring.count; offset++ {
 		value := ring.items[(ring.start+offset)%len(ring.items)]
-		if !value.Time.Before(cutoff) {
+		if !eventTime(value).Before(cutoff) {
 			result = append(result, value)
 		}
 	}
@@ -180,53 +199,15 @@ func (ring *upstreamRequestRing) Snapshot(cutoff time.Time, limit int) []Upstrea
 	return result
 }
 
-type upstreamAttemptRing struct {
-	items []UpstreamAttempt
-	start int
-	count int
+type upstreamRequestRing = eventRing[UpstreamRequest]
+type upstreamAttemptRing = eventRing[UpstreamAttempt]
+
+func newUpstreamRequestRing() upstreamRequestRing {
+	return newEventRing[UpstreamRequest](monitorRecentRequestCapacity)
 }
 
 func newUpstreamAttemptRing() upstreamAttemptRing {
-	return upstreamAttemptRing{items: make([]UpstreamAttempt, monitorRecentAttemptCapacity)}
-}
-
-func (ring *upstreamAttemptRing) Add(value UpstreamAttempt) {
-	if len(ring.items) == 0 {
-		ring.items = make([]UpstreamAttempt, monitorRecentAttemptCapacity)
-	}
-	index := (ring.start + ring.count) % len(ring.items)
-	if ring.count == len(ring.items) {
-		ring.items[index] = value
-		ring.start = (ring.start + 1) % len(ring.items)
-		return
-	}
-	ring.items[index] = value
-	ring.count++
-}
-
-func (ring *upstreamAttemptRing) PruneBefore(cutoff time.Time) {
-	for ring.count > 0 && ring.items[ring.start].Time.Before(cutoff) {
-		ring.items[ring.start] = UpstreamAttempt{}
-		ring.start = (ring.start + 1) % len(ring.items)
-		ring.count--
-	}
-}
-
-func (ring *upstreamAttemptRing) Snapshot(cutoff time.Time, limit int) []UpstreamAttempt {
-	if limit < 1 || ring.count == 0 {
-		return nil
-	}
-	result := make([]UpstreamAttempt, 0, min(ring.count, limit))
-	for offset := 0; offset < ring.count; offset++ {
-		value := ring.items[(ring.start+offset)%len(ring.items)]
-		if !value.Time.Before(cutoff) {
-			result = append(result, value)
-		}
-	}
-	if len(result) > limit {
-		result = result[len(result)-limit:]
-	}
-	return result
+	return newEventRing[UpstreamAttempt](monitorRecentAttemptCapacity)
 }
 
 type Monitor struct {

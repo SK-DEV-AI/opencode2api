@@ -6,8 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"math/big"
+	mathrand "math/rand"
 	"net/http"
 	"regexp"
 
@@ -120,7 +120,12 @@ func base62Fixed(n *big.Int, width int) string {
 func RandomID(prefix string, size int) string {
 	buf := make([]byte, size)
 	if _, err := rand.Read(buf); err != nil {
-		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+		// crypto/rand fails only on a broken host RNG. Degrade to math/rand
+		// for this ID instead of panicking: uniqueness weakens but the
+		// request still succeeds (recovery middleware would 500 it).
+		for i := range buf {
+			buf[i] = byte(mathrand.Intn(256))
+		}
 	}
 	return prefix + "_" + hex.EncodeToString(buf)
 }
