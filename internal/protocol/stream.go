@@ -96,6 +96,9 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 	heartbeat := newStreamHeartbeat(w, flusher)
 	defer heartbeat.stop()
 	readErr := readSSE(reader, func(eventName, data string) error {
+		// The handler fires only on data frames (readSSE skips ":"
+		// comments), so this stop cannot fire on keepalive-only thinking
+		// silence — it ends the heartbeat exactly when real content flows.
 		heartbeat.stop()
 		events, err := parser.Parse(eventName, data)
 		if err != nil {
