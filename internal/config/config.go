@@ -291,10 +291,10 @@ func normalizeReasoning(cfg *Config) error {
 // plus an empty string, which means "not forced".
 func validateEffort(name, value string) error {
 	switch value {
-	case "", "minimal", "low", "medium", "high", "xhigh", "max", "none":
+	case "", "auto", "minimal", "low", "medium", "high", "xhigh", "max", "none":
 		return nil
 	default:
-		return fmt.Errorf("%s must be one of minimal, low, medium, high, xhigh, max, none, or empty to disable the override", name)
+		return fmt.Errorf("%s must be one of auto, minimal, low, medium, high, xhigh, max, none, or empty to disable the override", name)
 	}
 }
 

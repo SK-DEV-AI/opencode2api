@@ -43,12 +43,15 @@ func TestProbeOfflineIsUnattempted(t *testing.T) {
 	gw := probeFixture(t, "http://127.0.0.1:1")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	success, reason, _, attempted := gw.probeFreeModel(ctx, "test-offline-free")
-	if attempted {
-		t.Errorf("offline probe reported attempted=true (success=%v reason=%q); want unattempted so nothing is recorded", success, reason)
+	result := gw.probeFreeModel(ctx, "test-offline-free")
+	if result.attempted {
+		t.Errorf("offline probe reported attempted=true (success=%v reason=%q); want unattempted so nothing is recorded", result.success, result.reason)
 	}
-	if success {
+	if result.success {
 		t.Errorf("offline probe reported success=true; nothing upstream responded")
+	}
+	if result.reason != "no_upstream_contact" {
+		t.Errorf("offline probe reason=%q; want no_upstream_contact", result.reason)
 	}
 }
 
@@ -65,12 +68,12 @@ func TestProbeHTTPErrorStillRecords(t *testing.T) {
 	gw := probeFixture(t, upstream.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	success, reason, _, attempted := gw.probeFreeModel(ctx, "test-offline-free")
-	if !attempted {
+	result := gw.probeFreeModel(ctx, "test-offline-free")
+	if !result.attempted {
 		t.Errorf("reachable-upstream probe reported attempted=false; want attempted=true")
 	}
-	if success {
+	if result.success {
 		t.Errorf("503 probe reported success=true")
 	}
-	t.Logf("recorded reason=%q", reason)
+	t.Logf("recorded reason=%q", result.reason)
 }

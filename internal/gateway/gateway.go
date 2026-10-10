@@ -28,15 +28,16 @@ const maxRequestBody = 32 << 20
 const anonymousZenKey = "public"
 
 type Gateway struct {
-	rotation   *rotation.Manager
-	cfg        config.Config
-	logger     *slog.Logger
-	transports *transportPool
-	zenNodes   *nodePool
-	goNodes    *nodePool
-	anonymous  *anonymousPool
-	catalog    *models.Catalog
-	monitor    *telemetry.Monitor
+	rotation     *rotation.Manager
+	cfg          config.Config
+	logger       *slog.Logger
+	transports   *transportPool
+	zenNodes     *nodePool
+	goNodes      *nodePool
+	anonymous    *anonymousPool
+	catalog      *models.Catalog
+	monitor      *telemetry.Monitor
+	availability *models.AvailabilityStore
 }
 
 func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*Gateway, error) {
@@ -162,6 +163,10 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		// only address /v1/chat/completions or /v1/responses — for example a
 		// gateway whose OpenAI platform pins every request to Responses.
 		if route.Protocol == wire.SystemOne {
+			if len(jsonutil.MapAt(payload, "questions")) == 0 || payload["state"] == nil {
+				wire.WriteError(w, external, http.StatusBadRequest, "this model uses System One decisions, not chat; send state and typed questions to /v1/systemone", "invalid_request_error", "model")
+				return
+			}
 			g.forwardSystemOne(w, r, body, payload, model, route)
 			return
 		}
@@ -504,7 +509,7 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 			}
 			return nil, fmt.Errorf("prepare %s upstream request: %w", tier, err)
 		}
-		if effort := g.cfg.ForcedEffort(jsonutil.StringAt(upstreamPayload, "model")); effort != "" {
+		if effort := g.resolvedEffort(jsonutil.StringAt(upstreamPayload, "model"), tier, protocol); effort != "" {
 			wire.ForcedEffort(protocol, upstreamPayload, effort)
 		}
 		encoded, err := json.Marshal(upstreamPayload)

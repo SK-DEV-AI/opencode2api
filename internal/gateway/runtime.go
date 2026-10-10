@@ -135,6 +135,7 @@ func (m *RuntimeManager) build(cfg config.Config) (*gatewayRuntime, error) {
 	}
 	gateway.catalog.SetPricingStore(m.metadata)
 	gateway.catalog.SetAvailabilityStore(availability)
+	gateway.availability = availability
 	gateway.catalog.SetCachePath(modelcatalog.CatalogCachePath(m.configPath))
 	return &gatewayRuntime{config: cfg, gateway: gateway, availability: availability, handler: gateway.Handler(), cancel: func() {}}, nil
 }
