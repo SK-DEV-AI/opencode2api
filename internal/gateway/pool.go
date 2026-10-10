@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -160,10 +161,22 @@ func newTransportPool(proxies []string, cfg config.PerformanceConfig, responseHe
 		transport.IdleConnTimeout = time.Duration(cfg.IdleConnTimeoutSeconds) * time.Second
 		transport.ResponseHeaderTimeout = responseHeaderTimeout
 		transport.ForceAttemptHTTP2 = true
-		transport.DialContext = (&net.Dialer{
+		// This box is v4-only over carrier NAT: v6 dials hang while AAAA
+		// still answers fast enough to trigger Happy Eyeballs. Pin to tcp4
+		// so cold dials skip the ~300ms v6 race entirely.
+		dialer := &net.Dialer{
 			Timeout:   time.Duration(cfg.ConnectTimeoutSeconds) * time.Second,
 			KeepAlive: 30 * time.Second,
-		}).DialContext
+		}
+		baseDial := dialer.DialContext
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return baseDial(ctx, "tcp4", addr)
+		}
+		// Session resumption saves ~1 RTT on every reconnect handshake.
+		// Safe with ForceAttemptHTTP2: h2 state rides the same TLS conn.
+		transport.TLSClientConfig = &tls.Config{
+			ClientSessionCache: tls.NewLRUClientSessionCache(128),
+		}
 		if raw == "direct" {
 			transport.Proxy = nil
 		} else {

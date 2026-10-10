@@ -42,10 +42,37 @@ func FirstAny(values ...any) any {
 }
 
 func CloneMap(input map[string]any) map[string]any {
-	data, _ := json.Marshal(input)
-	var output map[string]any
-	_ = json.Unmarshal(data, &output)
+	if input == nil {
+		return nil
+	}
+	return cloneMap(input)
+}
+
+// cloneMap deep-copies decoded JSON values without a marshal round-trip.
+// The old marshal+unmarshal form was both slower and lossy (every number
+// became float64, map order was not preserved). This preserves the decoded
+// types callers already hold: map[string]any, []any, scalars, json.Number.
+func cloneMap(input map[string]any) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = cloneValue(value)
+	}
 	return output
+}
+
+func cloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMap(typed)
+	case []any:
+		output := make([]any, len(typed))
+		for i, item := range typed {
+			output[i] = cloneValue(item)
+		}
+		return output
+	default:
+		return value
+	}
 }
 
 func AsSlice(value any) []any {
