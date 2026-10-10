@@ -139,17 +139,27 @@ Restart=on-failure
 - `anonymous: true` — free models route through Zen's anonymous channel (no upstream key needed)
 - `listen: "127.0.0.1:8787"` — localhost only
 - `prefer: "zen"`, 6 zen keys, 0 go keys
-- `retry.max_attempts: 6`, `attempt_timeout_seconds: 30`
+- `retry.max_attempts: 6`, `attempt_timeout_seconds: 15`, `first_event_timeout_seconds: 90`
 - `models.refresh_seconds: 300` — catalog refresh every 5 min
-- `webui.enabled: false`
+- `webui.enabled: true` (`127.0.0.1:8081`)
 
 **Build:** `cd ~/session-root/repos/opencode2api && go vet ./... && gofmt -l cmd internal webui && go build -o opencode2api ./cmd/opencode2api` (binary is gitignored; stop the service before `cp` or you get `Text file busy`)
 
-**Health:** `curl -s http://127.0.0.1:8787/healthz` — 2026-10-10: `ok`, ready, 83 total / 73 exposed, 6 zen keys, anonymous on
+**Health:** `curl -s http://127.0.0.1:8787/healthz` — 2026-10-10: `ok`, ready, 83 total / 75 exposed, 6 zen keys, anonymous on
 
 **Logs:** `journalctl --user -u opencode2api -f` (look for `legs`, `stop`, `cached`, `stream_zero_replay`)
 
 **Note:** the v1.3.5 merge (`cee34a4`) was local-only at first; the fork remote has since been pushed (branch `feat/observe-v130` is fully on `fork`).
+
+### v1.3.7 merge (2026-10-10, commits `f415dbf` + `7208546`, pushed)
+
+- **Upstream #54** (native-protocol probes + `reasoning.effort=auto`): probes use native protocol (SystemOne `noul` 1+1 question), only `model_unavailable` disables, 429/timeout/5xx stay inconclusive with 1h retry, legacy bad-session disables cleared on load, `/v1/models` gains `native_protocol` + `supported_endpoints`, rotation aliases hidden with no Go keys, chat payload to SystemOne model 400s fast.
+- **Upstream #57** (manual lock): restore takes manual control, `POST /api/models/manual` toggles manual/auto, disabled records keep evidence on inconclusive rechecks, WebUI control column.
+- **Ported Finding C** into new `probe.go`: `gotResponse` tracking returns `no_upstream_contact` unattempted when no lane reaches upstream (offline boot / hotspot drop never disables). Canonical `ses_` session was already upstream. `Record()` adapted to new `effort` param.
+- **Transport** (`pool.go`): tcp4 dial pin (v4-only carrier NAT, skip Happy Eyeballs) + LRU TLS session cache (reconnect handshake saving). Speed-audit findings 1+2, done.
+- **Config** (live, gitignored): `attempt_timeout_seconds: 15` + `first_event_timeout_seconds: 90` (both were 0/disabled). Speed-audit findings 3+4, done. False-positive cost is one extra attempt across 6 keys + anon.
+- **Serde** (`jsonutil/value.go`): typed `CloneMap` deep clone replaces marshal round-trip (faster, preserves number types). `prepareRouteBodies` double-encode left as-is (per-tier shaping, not safe to collapse without changing failover semantics).
+- **Proof**: vet clean, all tests + `-race` pass, healthz ready 83/75, live spark turns succeeding, the 2 prior `http_429` disables (`ling-3.1-flash-free`, `step-5-preview-free`) recovered to enabled on the new binary.
 
 ## Consumers
 
