@@ -151,6 +151,19 @@ Restart=on-failure
 
 **Note:** the v1.3.5 merge (`cee34a4`) was local-only at first; the fork remote has since been pushed (branch `feat/observe-v130` is fully on `fork`).
 
+**Merging upstream releases:** `./merge-upstream.sh` (repo root, committed
+2026-10-13). Check-only by default: fetches origin, lists incoming commits,
+and diffs the 11 fork-owned files (`internal/gateway/*` minus tests,
+`internal/protocol/stream*.go`, `internal/identity/request.go`,
+`internal/telemetry/{http,metrics}.go`, `internal/jsonutil/value.go`).
+`./merge-upstream.sh --merge [tag]` merges only when upstream touches NONE
+of them (backup tag + build/vet/gateway-tests gates, push never automatic).
+Any overlap → BLOCKED with per-file diff pointers for a human port — the
+correct outcome for `internal/identity/request.go`, which upstream rewrites
+every release (#69 clock-minted → #70 deterministic descending re-encode).
+Precedent: fork `7b458a2` ported #70 function-for-function, verified
+byte-identical, build+vet+gateway green.
+
 ### v1.3.7 merge (2026-10-10, commits `f415dbf` + `7208546`, pushed)
 
 - **Upstream #54** (native-protocol probes + `reasoning.effort=auto`): probes use native protocol (SystemOne `noul` 1+1 question), only `model_unavailable` disables, 429/timeout/5xx stay inconclusive with 1h retry, legacy bad-session disables cleared on load, `/v1/models` gains `native_protocol` + `supported_endpoints`, rotation aliases hidden with no Go keys, chat payload to SystemOne model 400s fast.
@@ -160,6 +173,13 @@ Restart=on-failure
 - **Config** (live, gitignored): `attempt_timeout_seconds: 15` + `first_event_timeout_seconds: 90` (both were 0/disabled). Speed-audit findings 3+4, done. False-positive cost is one extra attempt across 6 keys + anon.
 - **Serde** (`jsonutil/value.go`): typed `CloneMap` deep clone replaces marshal round-trip (faster, preserves number types). `prepareRouteBodies` double-encode left as-is (per-tier shaping, not safe to collapse without changing failover semantics).
 - **Proof**: vet clean, all tests + `-race` pass, healthz ready 83/75, live spark turns succeeding, the 2 prior `http_429` disables (`ling-3.1-flash-free`, `step-5-preview-free`) recovered to enabled on the new binary.
+
+### Upstream #70 port (2026-10-13, fork commit `7b458a2`, NOT a merge)
+
+- **Why a port, not a merge:** Zen tightened the free-tier gate ~2026-10-11 — the 12-hex session time part must now decode to the official client's `Identifier.descending()` layout (`~(ts_ms<<12|counter)`, counters 1-63). Raw-hash prefixes 403 on every lane even in perfect `ses_` shape (upstream issue #68, fixed by #70). Upstream #69 (clock-minted + cache) and #70 (deterministic descending re-encode) both rewrote `internal/identity/request.go`, a fork-owned file — so `./merge-upstream.sh` correctly reports BLOCKED and a human port was done instead.
+- **What the port did:** `CanonicalSessionID` keeps genuine descending IDs untouched (prompt-cache affinity preserved), re-encodes everything else deterministically (hash stamp to top 36 bits, counter 1 ORed, bitwise-NOT → `ffe` suffix). `descendingTimePart` + both regexes verified **byte-identical** to upstream #70. Fork's pre-existing `RandomID` math/rand fallback (commit `1a63481`) preserved — the only file-level delta vs upstream, deliberate and documented.
+- **NOT ported:** upstream `61769a9` deleted `internal/identity/request_test.go` (their #70 test). The fork never had that file (no identity tests exist here — gateway tests cover the behavior), so there was nothing to delete. If identity coverage is ever wanted, port that 69-line test file from upstream.
+- **Proof:** `go build ./...` OK, `go vet ./internal/identity/` OK, `go test ./internal/gateway/` OK (5s). Docs updated in the follow-up (`e538f2b`: AGENT.md findings + `ZEN-FREE-TIER.md` gate description).
 
 ## Consumers
 
