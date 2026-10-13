@@ -1,4 +1,4 @@
-# opencode2api fork — agent context (maintained by agent, 2026-10-09)
+# opencode2api fork — agent context (maintained by agent, 2026-10-13)
 
 ## Session hygiene (proven 2026-10-10 — jcode source-read, not vibes)
 - The "Session history: X tokens processed" warning counts LIFETIME cumulative tokens, not current context (`crates/jcode-tui/src/tui/ui_input.rs:617`, comment says "This is not current context usage"). First appears after one full context window of lifetime work. Compaction never resets it. Only `/clear` does.
@@ -43,13 +43,13 @@
 - Tool verdict: serena trialed 2026-10-09 (`uv tool install serena-agent` + gopls, indexed 59 Go files in ~8s, `POST /query_project` proven: accurate symbols on unread `admin/server.go`, all `probeFreeModel` callers with line numbers). CORRECTION 2026-10-09: jcode DOES have full MCP client support (`~/.jcode/mcp.json` registry + `--mcp-tools` flags; websearch/codesearch/mc-bridge all served from there) — my earlier "no MCP surface" claim was wrong. Serena wiring into the registry under test; KEEP `.serena/` index dirs out of the repo regardless. WIRED 2026-10-09: `serena` entry live in `~/.jcode/mcp.json` (wrapper `~/session-root/repos/serena-mcp/run`, gopls symlinked to `~/.local/bin`), MCP tools confirmed in-harness (`activate_project` + `get_symbols_overview` proven on never-opened `telemetry/metrics.go`).
 
 ## Repo/service
-- Repo: `~/session-root/repos/opencode2api`, branch `feat/observe-v130`, HEAD `1a63481`. Pushed to fork. Clean. Backup `backup-pre-rebase-20261007`.
+- Repo: `~/session-root/repos/opencode2api`, branch `feat/observe-v130`, HEAD `7b458a2`. Pushed to fork. Clean. Backup `backup-pre-rebase-20261007`.
 - Deploy ritual: `systemctl --user stop opencode2api`, `cp <new-binary> ./opencode2api`, `systemctl --user start opencode2api`, then `curl -sf http://127.0.0.1:8787/healthz` (`ready:true`, total ~84 / exposed ~75).
 - A `400 ... is disabled after a failed availability check` is the catalog guard (`catalog.go routeLocked`), not a crash.
 - Log reading: `duration_ms` = total downstream time; `legs` = per-attempt `key:status:ms` (headers timing ONLY — silence after headers is model thinking, invisible in legs); `outcome` success/client_canceled/stream_error; `in/out 0/0` on cancels = no usage frame arrived (expected); empty `stop` + canceled = killed while thinking.
 
 ## Findings (all KEEP — do not regress)
-- A (`ad2d5e7`): probe used raw `"availability:"+model` session, Zen 403s non-canonical → disabled 9 working models 24h. Fix: `CanonicalSessionID`. Runbook: `rm config.json.*.availability.json && restart`, or WebUI Restore, or wait `next_check` (1h ok / 24h fail).
+- A (`ad2d5e7` + `7b458a2` port of upstream #70): probe used raw `"availability:"+model` session, Zen 403s non-canonical → disabled 9 working models 24h. Fix: `CanonicalSessionID`. Then Zen tightened the gate AGAIN (~2026-10-11): the 12-hex time part must decode to the official client's `Identifier.descending()` layout (`~(ts_ms<<12|counter)`, counters 1-63); raw-hash prefixes 403 even in canonical shape. Port: re-encode foreign time parts to descending layout (counter 1 → `ffe` suffix), keep genuine descending IDs untouched. Runbook: `rm config.json.*.availability.json && restart`, or WebUI Restore, or wait `next_check` (1h ok / 24h fail).
 - B (`e9eac0d`, reverts `701f900`): hedged race fanned ~7x load/turn, broke session affinity, zero latency win. Replaced with SSE heartbeat (`:keepalive`/15s both lanes, stops at first byte). Known negligible race (timer vs emitter write, no mutex — one garbled frame worst case, self-healing). Perf back to stock (2048/256/5s/15s).
 - Muse verdict (NOT proxy): "loads forever" = thinking + 160-200K ctx; legs `anon:200:3-9s` then 184s `client_canceled` (jcode gave up first); small-ctx = fast; high > xhigh.
 - Suffix naming (NOT proxy): `-free` is upstream naming; free = models.dev `0/0` (big-pickle) OR name substring; jev-1.13/sota/sweet route via key lanes.
@@ -87,7 +87,7 @@
 ## Routing/catalog
 - `catalog.Route`: anonymous-first for free models (pricing store decides, `-free` fallback), then KeyTiers in prefer order. Per-tier native protocols; bodies re-encoded per tier.
 - PricingStore: models.dev 24h refresh → anonymous allow/deny. Discovery: per-tier /v1/models + `models.opencode.ai/api.json` SDK→protocol map + docs tables fallback. Metadata (context windows etc) on GET /v1/models.
-- Session affinity: `CursorFor(session)` pins key per conversation (cache affinity). IDs: `CanonicalSessionID` → `ses_`+sha256 shape (free tier 403s anything else); preserve upstream cache affinity. Derivation: headers → first user turn → previous_response_id → random fallback.
+- Session affinity: `CursorFor(session)` pins key per conversation (cache affinity). IDs: `CanonicalSessionID` → `ses_` + descending-encoded time part (`ffe` suffix) + base62 (free tier 403s raw-hash prefixes since ~2026-10-11, upstream #70); genuine client descending IDs pass through untouched. Derivation: headers → first user turn → previous_response_id → random fallback.
 - `-free` is upstream's ID naming, not our label. Free = models.dev `0/0` costs (e.g. `big-pickle`) OR `free` in name. `jev-1.13`/`sota`/`sweet` are in NEITHER (absent from 132-entry models.dev cache) → anon lane denies them, but they route via the 6 free keys' lanes and still list in `/v1/models`. Nothing to fix.
 
 ## Telemetry

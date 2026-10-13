@@ -55,6 +55,13 @@ no credential bill as `anonymous`. Usage is still tracked per request
   `x-session-affinity`: it preserves cache affinity end to end.
 - Free tier rejects non-canonical session shapes with 403 FreeTierError,
   so the canonicalization is mandatory, not cosmetic.
+- Since ~2026-10-11 it ALSO validates the 12-hex time-part encoding: must
+  decode to the official client's `Identifier.descending()` layout
+  (`~(ts_ms<<12|counter)`, counters 1-63). Raw-hash prefixes 403 with
+  `FreeTierError: free tier can only be used from within OpenCode` on EVERY
+  lane (anon + keys) even in perfect `ses_` shape. Upstream #70, ported as
+  fork `7b458a2`: re-encode foreign time parts to descending layout
+  (counter 1 → `ffe` suffix), pass genuine descending IDs through.
 
 ## What this means for the proxy (all keys are free, no paid tier)
 
