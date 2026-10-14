@@ -181,6 +181,12 @@ byte-identical, build+vet+gateway green.
 - **NOT ported:** upstream `61769a9` deleted `internal/identity/request_test.go` (their #70 test). The fork never had that file (no identity tests exist here — gateway tests cover the behavior), so there was nothing to delete. If identity coverage is ever wanted, port that 69-line test file from upstream.
 - **Proof:** `go build ./...` OK, `go vet ./internal/identity/` OK, `go test ./internal/gateway/` OK (5s). Docs updated in the follow-up (`e538f2b`: AGENT.md findings + `ZEN-FREE-TIER.md` gate description).
 
+### Single-marshal shaping (2026-10-14, fork commit `bc2410a`, live)
+
+- **What:** `prepareRouteBodies` shapes the Zen payload on the decoded map (`shapeAnonymousPayload`: stream + usage + agent tools) before the single per-tier marshal. The anon lane sends `bodies[zen]` verbatim — the old 2nd serde pass in `doAnonymousUpstream` (unmarshal + remarshal) is deleted. `prepareAnonymousBody` (bytes form) stays for probes + Go-tier key shaping, now a thin wrapper over the same map function.
+- **Collapse flag:** `shapeKeyBody` on Zen returns shaped=true structurally (Zen bodies are always pre-shaped; collapse only runs for non-stream clients whose payloads always needed forcing, so the old bytes-compare was always true there too). Go/SystemOne paths unchanged.
+- **Proof:** temp byte-equivalence test passed on all shapes (stream/non-stream x tools/no-tools + SystemOne passthrough, then removed), full suite + `-race` green, live deploy healthy, non-stream smoke returns clean collapse with usage, 28/28 success post-deploy.
+
 ## Consumers
 
 ### opencode (primary)
