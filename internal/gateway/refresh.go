@@ -50,10 +50,14 @@ func (g *Gateway) verifyProxyAfterError(ctx context.Context, proxy *proxyTranspo
 	if !proxy.checking.CompareAndSwap(false, true) {
 		return
 	}
-	// The client request may finish or be cancelled while the verification is
-	// running. Keep its values but give the proxy check an independent timeout.
-	checkCtx := context.WithoutCancel(ctx)
+	// Bound the check to the caller's lifetime plus the check timeout: a
+	// detached context (context.WithoutCancel) let verifications outlive
+	// client disconnects and server shutdown, running the full 10s against
+	// a dead network and serializing on the checking flag. The timeout
+	// still caps a hung check; cancellation just ends a pointless one.
+	checkCtx, cancel := context.WithTimeout(ctx, proxyHealthCheckTimeout)
 	go func() {
+		defer cancel()
 		result := g.transports.checkClaimedProxy(checkCtx, proxy, proxyHealthCheckURL, proxyHealthCheckTimeout)
 		g.applyProxyHealthResult(result, "upstream HTTP response", status)
 	}()
