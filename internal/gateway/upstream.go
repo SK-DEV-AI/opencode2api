@@ -271,12 +271,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	if len(body) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
-	// The anonymous free tier only serves agent-shaped streaming requests
-	// (anything else is rejected with 403 FreeTierError). Normalize the
-	// wire body here; the gateway collapses the stream back when the
-	// downstream client asked for a plain JSON reply. Key tiers keep their
-	// original bodies.
-	body = prepareAnonymousBody(body, route.ProtocolFor(config.TierZen))
+	// The Zen body arrives pre-shaped from prepareRouteBodies (agent-shaped
+	// streaming on the map, marshaled once); the gateway collapses the
+	// stream back when the downstream client asked for a plain JSON reply.
+	// Key tiers keep their original bodies.
 	for attempts < limit {
 		if ctx.Err() != nil {
 			// The request-level budget is already gone. Stop scanning instead
@@ -347,6 +345,29 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 // definitions for whichever ones the downstream client did not declare.
 var anonymousCoreTools = []string{"bash", "edit", "glob", "grep", "read"}
 
+// shapeAnonymousPayload normalizes a decoded upstream payload for the
+// anonymous free tier: streaming enabled plus the core agent tools present.
+// It reports whether the payload changed. System One payloads are decision
+// requests, not agent traffic, so they are left untouched; injecting
+// streaming or tool definitions would make the upstream reject them.
+func shapeAnonymousPayload(payload map[string]any, protocol wire.Protocol) bool {
+	if protocol == wire.SystemOne || payload == nil {
+		return false
+	}
+	changed := false
+	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
+		payload["stream"] = true
+		changed = true
+	}
+	if ensureAnonymousChatUsage(payload, protocol) {
+		changed = true
+	}
+	if ensureAnonymousTools(payload, protocol) {
+		changed = true
+	}
+	return changed
+}
+
 // prepareAnonymousBody returns a copy of body normalized for the anonymous
 // free tier: streaming enabled plus the core agent tools present. Bodies
 // that already satisfy both (or are not JSON objects) are returned
@@ -361,18 +382,7 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
 	}
-	changed := false
-	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
-		payload["stream"] = true
-		changed = true
-	}
-	if ensureAnonymousChatUsage(payload, protocol) {
-		changed = true
-	}
-	if ensureAnonymousTools(payload, protocol) {
-		changed = true
-	}
-	if !changed {
+	if !shapeAnonymousPayload(payload, protocol) {
 		return body
 	}
 	encoded, err := json.Marshal(payload)
@@ -531,13 +541,27 @@ func (g *Gateway) dumpOutboundBodies(route models.Route, bodies map[config.Tier]
 // (stream + core tools), mirroring the anonymous lane. Upstream now
 // rejects non-agent-shaped free-tier requests on every lane with 403
 // FreeTierError; paid models keep their original bodies. It reports
-// whether the body changed so the gateway can collapse the SSE stream a
-// non-streaming client receives back.
+// whether the body is in shaped form so the gateway can collapse the SSE
+// stream a non-streaming client receives back.
 func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier) ([]byte, bool) {
 	if !g.catalog.IsFreeModel(route.ID) {
 		return body, false
 	}
-	shaped := prepareAnonymousBody(body, route.ProtocolFor(tier))
+	protocol := route.ProtocolFor(tier)
+	if protocol == wire.SystemOne {
+		return body, false
+	}
+	if tier == config.TierZen {
+		// Zen bodies arrive pre-shaped from prepareRouteBodies (shaped on
+		// the map, marshaled once), so there is no bytes comparison left
+		// to run: the shaped flag is structural. This matches the old
+		// compare on every reachable path — collapse only runs for
+		// non-streaming clients, whose payloads always needed at least
+		// the stream flag forced, so the old compare always reported
+		// changed there too.
+		return body, true
+	}
+	shaped := prepareAnonymousBody(body, protocol)
 	return shaped, !bytes.Equal(shaped, body)
 }
 
