@@ -26,6 +26,7 @@ type metricBucket struct {
 	usageModels   map[string]TokenCounts
 	usageTiers    map[string]TokenCounts
 	usageSessions map[string]TokenCounts
+	usageKeys     map[string]ServerKeyUsage
 }
 
 func (b *metricBucket) reset(minute int64) {
@@ -33,7 +34,7 @@ func (b *metricBucket) reset(minute int64) {
 		minute: minute, endpoints: make(map[string]uint64), models: make(map[string]uint64),
 		tiers: make(map[string]uint64), statuses: make(map[string]uint64),
 		usageModels: make(map[string]TokenCounts), usageTiers: make(map[string]TokenCounts),
-		usageSessions: make(map[string]TokenCounts),
+		usageSessions: make(map[string]TokenCounts), usageKeys: make(map[string]ServerKeyUsage),
 	}
 }
 
@@ -56,6 +57,14 @@ type UsagePeriod struct {
 	// upstream IP bucket on the anonymous lane, so this shows which
 	// conversation is draining the daily budget.
 	Sessions map[string]TokenCounts `json:"sessions"`
+	// ServerKeys maps the local server key fingerprint (or "playground") to
+	// its share of Requests and Tokens, so the entries sum to the totals.
+	ServerKeys map[string]ServerKeyUsage `json:"server_keys"`
+}
+
+type ServerKeyUsage struct {
+	Requests uint64 `json:"requests"`
+	TokenCounts
 }
 
 type UsageSnapshot struct {
@@ -97,20 +106,21 @@ type UpstreamAttempt struct {
 // client inference request. It is kept separately from UpstreamAttempt,
 // because a single request can try several keys before it succeeds.
 type UpstreamRequest struct {
-	Time       time.Time `json:"time"`
-	RequestID  string    `json:"request_id"`
-	Session    string    `json:"session,omitempty"`
-	Model      string    `json:"model"`
-	Tier       string    `json:"tier,omitempty"`
-	KeyID      string    `json:"key_id,omitempty"`
-	Channel    string    `json:"channel"`
-	Anonymous  bool      `json:"anonymous"`
-	Proxy      string    `json:"proxy_node,omitempty"`
-	Attempts   int       `json:"attempts"`
-	Status     int       `json:"status"`
-	DurationMS int64     `json:"duration_ms"`
-	Success    bool      `json:"success"`
-	Outcome    string    `json:"outcome"`
+	Time        time.Time `json:"time"`
+	RequestID   string    `json:"request_id"`
+	Session     string    `json:"session,omitempty"`
+	ServerKeyID string    `json:"server_key_id,omitempty"`
+	Model       string    `json:"model"`
+	Tier        string    `json:"tier,omitempty"`
+	KeyID       string    `json:"key_id,omitempty"`
+	Channel     string    `json:"channel"`
+	Anonymous   bool      `json:"anonymous"`
+	Proxy       string    `json:"proxy_node,omitempty"`
+	Attempts    int       `json:"attempts"`
+	Status      int       `json:"status"`
+	DurationMS  int64     `json:"duration_ms"`
+	Success     bool      `json:"success"`
+	Outcome     string    `json:"outcome"`
 }
 
 type attemptBucket struct {
@@ -131,38 +141,19 @@ const (
 	monitorRecentOutputLimit     = 500
 )
 
-type timedEvent interface {
-	UpstreamRequest | UpstreamAttempt
+type upstreamRequestRing struct {
+	items []UpstreamRequest
+	start int
+	count int
 }
 
-// eventRing is a fixed-capacity FIFO over timestamped monitor events.
-// It replaces the former per-type upstreamRequestRing/upstreamAttemptRing
-// pair, which were exact clones differing only in element type.
-type eventRing[T timedEvent] struct {
-	items    []T
-	start    int
-	count    int
-	capacity int
+func newUpstreamRequestRing() upstreamRequestRing {
+	return upstreamRequestRing{items: make([]UpstreamRequest, monitorRecentRequestCapacity)}
 }
 
-func newEventRing[T timedEvent](capacity int) eventRing[T] {
-	return eventRing[T]{items: make([]T, capacity), capacity: capacity}
-}
-
-func eventTime[T timedEvent](value T) time.Time {
-	switch event := any(value).(type) {
-	case UpstreamRequest:
-		return event.Time
-	case UpstreamAttempt:
-		return event.Time
-	default:
-		return time.Time{}
-	}
-}
-
-func (ring *eventRing[T]) Add(value T) {
+func (ring *upstreamRequestRing) Add(value UpstreamRequest) {
 	if len(ring.items) == 0 {
-		ring.items = make([]T, ring.capacity)
+		ring.items = make([]UpstreamRequest, monitorRecentRequestCapacity)
 	}
 	index := (ring.start + ring.count) % len(ring.items)
 	if ring.count == len(ring.items) {
@@ -174,22 +165,22 @@ func (ring *eventRing[T]) Add(value T) {
 	ring.count++
 }
 
-func (ring *eventRing[T]) PruneBefore(cutoff time.Time) {
-	for ring.count > 0 && eventTime(ring.items[ring.start]).Before(cutoff) {
-		ring.items[ring.start] = *new(T)
+func (ring *upstreamRequestRing) PruneBefore(cutoff time.Time) {
+	for ring.count > 0 && ring.items[ring.start].Time.Before(cutoff) {
+		ring.items[ring.start] = UpstreamRequest{}
 		ring.start = (ring.start + 1) % len(ring.items)
 		ring.count--
 	}
 }
 
-func (ring *eventRing[T]) Snapshot(cutoff time.Time, limit int) []T {
+func (ring *upstreamRequestRing) Snapshot(cutoff time.Time, limit int) []UpstreamRequest {
 	if limit < 1 || ring.count == 0 {
 		return nil
 	}
-	result := make([]T, 0, min(ring.count, limit))
+	result := make([]UpstreamRequest, 0, min(ring.count, limit))
 	for offset := 0; offset < ring.count; offset++ {
 		value := ring.items[(ring.start+offset)%len(ring.items)]
-		if !eventTime(value).Before(cutoff) {
+		if !value.Time.Before(cutoff) {
 			result = append(result, value)
 		}
 	}
@@ -199,15 +190,53 @@ func (ring *eventRing[T]) Snapshot(cutoff time.Time, limit int) []T {
 	return result
 }
 
-type upstreamRequestRing = eventRing[UpstreamRequest]
-type upstreamAttemptRing = eventRing[UpstreamAttempt]
-
-func newUpstreamRequestRing() upstreamRequestRing {
-	return newEventRing[UpstreamRequest](monitorRecentRequestCapacity)
+type upstreamAttemptRing struct {
+	items []UpstreamAttempt
+	start int
+	count int
 }
 
 func newUpstreamAttemptRing() upstreamAttemptRing {
-	return newEventRing[UpstreamAttempt](monitorRecentAttemptCapacity)
+	return upstreamAttemptRing{items: make([]UpstreamAttempt, monitorRecentAttemptCapacity)}
+}
+
+func (ring *upstreamAttemptRing) Add(value UpstreamAttempt) {
+	if len(ring.items) == 0 {
+		ring.items = make([]UpstreamAttempt, monitorRecentAttemptCapacity)
+	}
+	index := (ring.start + ring.count) % len(ring.items)
+	if ring.count == len(ring.items) {
+		ring.items[index] = value
+		ring.start = (ring.start + 1) % len(ring.items)
+		return
+	}
+	ring.items[index] = value
+	ring.count++
+}
+
+func (ring *upstreamAttemptRing) PruneBefore(cutoff time.Time) {
+	for ring.count > 0 && ring.items[ring.start].Time.Before(cutoff) {
+		ring.items[ring.start] = UpstreamAttempt{}
+		ring.start = (ring.start + 1) % len(ring.items)
+		ring.count--
+	}
+}
+
+func (ring *upstreamAttemptRing) Snapshot(cutoff time.Time, limit int) []UpstreamAttempt {
+	if limit < 1 || ring.count == 0 {
+		return nil
+	}
+	result := make([]UpstreamAttempt, 0, min(ring.count, limit))
+	for offset := 0; offset < ring.count; offset++ {
+		value := ring.items[(ring.start+offset)%len(ring.items)]
+		if !value.Time.Before(cutoff) {
+			result = append(result, value)
+		}
+	}
+	if len(result) > limit {
+		result = result[len(result)-limit:]
+	}
+	return result
 }
 
 type Monitor struct {
@@ -220,6 +249,7 @@ type Monitor struct {
 	mu              sync.Mutex
 	buckets         [60]metricBucket
 	lifetimeUsage   UsagePeriod
+	sessionSeen     map[string]int64
 	attemptLifetime AttemptAggregate
 	attemptBuckets  [60]attemptBucket
 	recentRequests  upstreamRequestRing
@@ -230,6 +260,7 @@ func NewMonitor() *Monitor {
 	return &Monitor{
 		started:         time.Now().UTC(),
 		lifetimeUsage:   newUsagePeriod(),
+		sessionSeen:     make(map[string]int64),
 		attemptLifetime: newAttemptAggregate(),
 		recentRequests:  newUpstreamRequestRing(),
 		recentAttempts:  newUpstreamAttemptRing(),
@@ -296,11 +327,13 @@ func (m *Monitor) Record(endpoint string, status int, duration time.Duration, me
 			addTokenMap(m.lifetimeUsage.Models, meta.Model, tokens)
 			addTokenMap(m.lifetimeUsage.Tiers, meta.Tier, tokens)
 			addTokenMap(bucket.usageSessions, meta.Session, tokens)
-			addTokenMap(m.lifetimeUsage.Sessions, meta.Session, tokens)
+			m.addLifetimeSessionLocked(meta.Session, tokens)
+			addServerKeyUsage(bucket.usageKeys, meta.ServerKeyID, ServerKeyUsage{Requests: 1, TokenCounts: tokens})
+			addServerKeyUsage(m.lifetimeUsage.ServerKeys, meta.ServerKeyID, ServerKeyUsage{Requests: 1, TokenCounts: tokens})
 		}
 		if meta.Request != "" && meta.Model != "" {
 			request := UpstreamRequest{
-				Time: time.Now().UTC(), RequestID: meta.Request, Session: meta.Session, Model: meta.Model, Tier: meta.Tier,
+				Time: time.Now().UTC(), RequestID: meta.Request, Session: meta.Session, ServerKeyID: meta.ServerKeyID, Model: meta.Model, Tier: meta.Tier,
 				KeyID: meta.KeyID, Channel: meta.Channel, Anonymous: meta.Anonymous, Proxy: meta.Proxy,
 				Attempts: meta.Attempts, Status: status, DurationMS: max(duration.Milliseconds(), 0),
 				Success: success,
@@ -403,6 +436,27 @@ type MetricSeries struct {
 	UsageReported   uint64    `json:"usage_reported"`
 }
 
+// ServerKeyUsage returns per-server-key usage for the lifetime and the last
+// hour. The API key list polls it, so it skips building a full Snapshot.
+func (m *Monitor) ServerKeyUsage() (lifetime, window map[string]ServerKeyUsage) {
+	nowMinute := time.Now().Unix() / 60
+	lifetime, window = make(map[string]ServerKeyUsage), make(map[string]ServerKeyUsage)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, value := range m.lifetimeUsage.ServerKeys {
+		lifetime[key] = value
+	}
+	for offset := int64(0); offset < 60; offset++ {
+		minute := nowMinute - offset
+		if bucket := &m.buckets[minute%60]; bucket.minute == minute {
+			for key, value := range bucket.usageKeys {
+				addServerKeyUsage(window, key, value)
+			}
+		}
+	}
+	return lifetime, window
+}
+
 func (m *Monitor) Snapshot() MonitorSnapshot {
 	nowMinute := time.Now().Unix() / 60
 	window := MetricSummary{}
@@ -440,6 +494,9 @@ func (m *Monitor) Snapshot() MonitorSnapshot {
 			mergeTokenMaps(usageWindow.Models, bucket.usageModels)
 			mergeTokenMaps(usageWindow.Tiers, bucket.usageTiers)
 			mergeTokenMaps(usageWindow.Sessions, bucket.usageSessions)
+			for key, value := range bucket.usageKeys {
+				addServerKeyUsage(usageWindow.ServerKeys, key, value)
+			}
 		}
 		attemptBucket := &m.attemptBuckets[minute%60]
 		if attemptBucket.minute == minute {
@@ -486,7 +543,7 @@ func mergeCounts(target, source map[string]uint64) {
 }
 
 func newUsagePeriod() UsagePeriod {
-	return UsagePeriod{Models: make(map[string]TokenCounts), Tiers: make(map[string]TokenCounts), Sessions: make(map[string]TokenCounts)}
+	return UsagePeriod{Models: make(map[string]TokenCounts), Tiers: make(map[string]TokenCounts), Sessions: make(map[string]TokenCounts), ServerKeys: make(map[string]ServerKeyUsage)}
 }
 
 func tokenCounts(usage protocol.Usage) TokenCounts {
@@ -513,10 +570,46 @@ func addTokenMap(target map[string]TokenCounts, key string, value TokenCounts) {
 	target[key] = current
 }
 
+func addServerKeyUsage(target map[string]ServerKeyUsage, key string, value ServerKeyUsage) {
+	if key == "" {
+		return
+	}
+	current := target[key]
+	current.Requests += value.Requests
+	addTokenCounts(&current.TokenCounts, value.TokenCounts)
+	target[key] = current
+}
+
 func mergeTokenMaps(target, source map[string]TokenCounts) {
 	for key, value := range source {
 		addTokenMap(target, key, value)
 	}
+}
+
+// maxLifetimeSessions bounds the lifetime per-session burn map. Session IDs
+// are high-cardinality (one per conversation), so an unbounded map grows
+// forever. When full, the least recently seen session is evicted: evicting the
+// smallest total would drop the newest conversation first, so every new
+// session would push out the previous one. Buckets and snapshots are
+// short-lived and stay uncapped.
+const maxLifetimeSessions = 500
+
+func (m *Monitor) addLifetimeSessionLocked(session string, tokens TokenCounts) {
+	if session == "" {
+		return
+	}
+	if _, ok := m.lifetimeUsage.Sessions[session]; !ok && len(m.lifetimeUsage.Sessions) >= maxLifetimeSessions {
+		victim, oldest := "", int64(0)
+		for key, seen := range m.sessionSeen {
+			if victim == "" || seen < oldest {
+				victim, oldest = key, seen
+			}
+		}
+		delete(m.lifetimeUsage.Sessions, victim)
+		delete(m.sessionSeen, victim)
+	}
+	m.sessionSeen[session] = time.Now().UnixNano()
+	addTokenMap(m.lifetimeUsage.Sessions, session, tokens)
 }
 
 func cloneUsagePeriod(source UsagePeriod) UsagePeriod {
@@ -525,6 +618,9 @@ func cloneUsagePeriod(source UsagePeriod) UsagePeriod {
 	mergeTokenMaps(result.Models, source.Models)
 	mergeTokenMaps(result.Tiers, source.Tiers)
 	mergeTokenMaps(result.Sessions, source.Sessions)
+	for key, value := range source.ServerKeys {
+		addServerKeyUsage(result.ServerKeys, key, value)
+	}
 	return result
 }
 

@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-func TestEventRingFIFO(t *testing.T) {
-	ring := newEventRing[UpstreamRequest](3)
+func TestRequestRingFIFO(t *testing.T) {
+	ring := upstreamRequestRing{items: make([]UpstreamRequest, 3)}
 	base := time.Now().UTC()
 	for i := 0; i < 3; i++ {
 		ring.Add(UpstreamRequest{RequestID: string(rune('a' + i)), Time: base.Add(time.Duration(i) * time.Minute)})
@@ -29,8 +29,8 @@ func TestEventRingFIFO(t *testing.T) {
 	}
 }
 
-func TestEventRingAttemptType(t *testing.T) {
-	ring := newEventRing[UpstreamAttempt](2)
+func TestAttemptRingFIFO(t *testing.T) {
+	ring := upstreamAttemptRing{items: make([]UpstreamAttempt, 2)}
 	base := time.Now().UTC()
 	ring.Add(UpstreamAttempt{RequestID: "x", Time: base})
 	ring.Add(UpstreamAttempt{RequestID: "y", Time: base.Add(time.Minute)})

@@ -48,10 +48,10 @@ func CloneMap(input map[string]any) map[string]any {
 	return cloneMap(input)
 }
 
-// cloneMap deep-copies decoded JSON values without a marshal round-trip.
-// The old marshal+unmarshal form was both slower and lossy (every number
-// became float64, map order was not preserved). This preserves the decoded
-// types callers already hold: map[string]any, []any, scalars, json.Number.
+// cloneMap deep-copies decoded JSON without a marshal round-trip. Only
+// map[string]any and []any are copied; every other value is shared as-is, so
+// callers must pass trees produced by encoding/json, not maps built from typed
+// Go slices or structs, which would alias instead of being normalized.
 func cloneMap(input map[string]any) map[string]any {
 	output := make(map[string]any, len(input))
 	for key, value := range input {

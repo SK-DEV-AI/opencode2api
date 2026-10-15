@@ -31,6 +31,10 @@ type RequestMeta struct {
 	Stop      string
 	Tail      string
 	Stream    bool
+	// ServerKeyID is the fingerprint of the local server key the caller
+	// authenticated with, so usage can be split per caller. KeyID is the
+	// upstream account that served the request.
+	ServerKeyID string
 	// Shaped marks a key-tier free-model request whose wire body was
 	// normalized to agent shape (stream + core tools) like the anonymous
 	// lane. Non-streaming responses for shaped requests arrive as SSE
@@ -41,6 +45,10 @@ type RequestMeta struct {
 	AttemptOutcome string
 	Outcome        string
 }
+
+// PlaygroundServerKey buckets admin Playground traffic, which authenticates
+// with whichever server key is enabled first and is not that caller's usage.
+const PlaygroundServerKey = "playground"
 
 type requestMetaKey struct{}
 
@@ -117,8 +125,8 @@ func Middleware(monitor *Monitor, logger *slog.Logger, next http.Handler) http.H
 			if meta.Channel != "" {
 				logger.Info("request routed", "component", "http", "event", "request_routed", "method", r.Method,
 					"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "request_id", meta.Request,
-					"model", meta.Model, "model_alias", meta.ModelAlias, "session", meta.Session, "tier", meta.Tier, "key_id", meta.KeyID, "channel", meta.Channel,
-					"anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "outcome", outcome,
+					"model", meta.Model, "model_alias", meta.ModelAlias, "session", meta.Session, "server_key_id", meta.ServerKeyID, "tier", meta.Tier, "key_id", meta.KeyID,
+					"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "outcome", outcome,
 					"stop", meta.Stop, "in", meta.Usage.Input, "out", meta.Usage.Output, "reasoning_tokens", meta.Usage.Reasoning, "cached", meta.Usage.Cached, "tail", meta.Tail)
 			}
 			logger.Debug("request completed", "component", "http", "event", "request_complete", "method", r.Method,

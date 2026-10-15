@@ -55,11 +55,15 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 	return override, ok && override.KeyID != ""
 }
 
-func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, int, error) {
-	return g.doUpstreamWithOffset(ctx, route, bodies, ids, 0)
+func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
+	resp, effectiveRoute, _, err := g.doUpstreamCounted(ctx, route, bodies, ids, 0)
+	return resp, effectiveRoute, err
 }
 
-func (g *Gateway) doUpstreamWithOffset(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, models.Route, int, error) {
+// doUpstreamCounted is doUpstream with the attempt count surfaced, so the
+// zero-delivery stream replay can continue leg numbering instead of
+// restarting at 1. Upstream's doUpstream stays the canonical 3-value path.
+func (g *Gateway) doUpstreamCounted(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, models.Route, int, error) {
 	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, attemptOffset)
 	if _, selected := debugKeyOverrideFrom(ctx); selected {
 		return resp, effectiveRoute, attempts, err
@@ -273,10 +277,10 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	if len(body) == 0 {
 		return nil, errors.New("no prepared Zen request body"), 0
 	}
-	// The Zen body arrives pre-shaped from prepareRouteBodies (agent-shaped
-	// streaming on the map, marshaled once); the gateway collapses the
-	// stream back when the downstream client asked for a plain JSON reply.
-	// Key tiers keep their original bodies.
+	// The Zen body arrives pre-shaped from prepareRouteBodies (shaped on the
+	// decoded map, marshaled once); the gateway collapses the stream back
+	// when the downstream client asked for a plain JSON reply. Key tiers
+	// keep their original bodies.
 	for attempts < limit {
 		if ctx.Err() != nil {
 			// The request-level budget is already gone. Stop scanning instead
@@ -306,7 +310,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 		}
 		setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
 		started := time.Now()
-		resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+		resp, err := doInferenceAttempt(node.proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
 		duration := time.Since(started)
 		if ctx.Err() != nil {
 			// The parent budget expired while this attempt was in flight. Its
@@ -325,7 +329,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			return resp, nil, attempts
 		}
 		lastResponse = resp
-		lastErr = err
+		lastErr = asProxyUnavailable(node.proxy, err)
 		if err != nil {
 			g.logger.Debug("anonymous transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "duration_ms", duration.Milliseconds(), "error", err)
 		} else {
@@ -337,6 +341,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no healthy anonymous proxies available")
+		if !g.transports.hasHealthy() {
+			lastErr = fmt.Errorf("no healthy anonymous proxies available: %w", errProxyUnavailable)
+		}
 	}
 	return nil, lastErr, attempts
 }
@@ -412,11 +419,11 @@ func shapeAnonymousPayload(payload map[string]any, protocol wire.Protocol) bool 
 }
 
 // prepareAnonymousBody returns a copy of body normalized for the anonymous
-// free tier: streaming enabled plus the core agent tools present. Bodies
-// that already satisfy both (or are not JSON objects) are returned
-// unchanged. System One payloads are decision requests, not agent traffic, so
-// they are forwarded verbatim; injecting streaming or tool definitions would
-// make the upstream reject them.
+// free tier: streaming enabled plus the core agent tools present with genuine
+// definitions. Bodies that already satisfy all of that (or are not JSON
+// objects) are returned unchanged. System One payloads are decision requests,
+// not agent traffic, so they are forwarded verbatim; injecting streaming or
+// tool definitions would make the upstream reject them.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if protocol == wire.SystemOne {
 		return body
@@ -425,7 +432,18 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
 	}
-	if !shapeAnonymousPayload(payload, protocol) {
+	changed := false
+	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
+		payload["stream"] = true
+		changed = true
+	}
+	if ensureAnonymousChatUsage(payload, protocol) {
+		changed = true
+	}
+	if ensureAnonymousTools(payload, protocol) {
+		changed = true
+	}
+	if !changed {
 		return body
 	}
 	encoded, err := json.Marshal(payload)
@@ -626,8 +644,7 @@ func (g *Gateway) shapeKeyBody(body []byte, route models.Route, tier config.Tier
 	if tier == config.TierZen {
 		// Zen bodies arrive pre-shaped from prepareRouteBodies (shaped on
 		// the map, marshaled once), so there is no bytes comparison left
-		// to run: the shaped flag is structural. This matches the old
-		// compare on every reachable path — collapse only runs for
+		// to run: the shaped flag is structural. Collapse only runs for
 		// non-streaming clients, whose payloads always needed at least
 		// the stream flag forced, so the old compare always reported
 		// changed there too.
@@ -678,11 +695,11 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 		return nil, err, 0
 	}
 	started := time.Now()
-	resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+	resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
 	duration := time.Since(started)
 	g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+1, keyID, "key", false, proxy, resp, err, duration)
 	if err != nil {
-		return nil, err, 1
+		return nil, asProxyUnavailable(proxy, err), 1
 	}
 	return resp, nil, 1
 }
@@ -735,19 +752,19 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			httpx.DrainAndClose(lastResponse.Body)
 			lastResponse = nil
 		}
+		req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key)
+		if err != nil {
+			return nil, err, attempts
+		}
 		proxy := nodes.Proxy(node)
 		if proxy == nil {
 			lastErr = errors.New("upstream key has no proxy binding")
 			break
 		}
-		req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key)
-		if err != nil {
-			return nil, err, attempts
-		}
 		keyID := config.KeyDisplayID(node.key)
 		setRequestCredential(ctx, route.Tier, keyID, "key", false, proxy)
 		attemptStarted := time.Now()
-		resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
+		resp, err := doInferenceAttempt(proxy.client, req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
 		attemptDuration := time.Since(attemptStarted)
 		if ctx.Err() != nil {
 			// The request budget expired while this attempt was in flight. A
@@ -775,7 +792,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			return resp, nil, attempts
 		}
 		lastResponse = resp
-		lastErr = err
+		lastErr = asProxyUnavailable(proxy, err)
 		if err != nil {
 			g.logger.Debug("upstream transport attempt failed", "component", "upstream", "event", "attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", route.Tier, "key_id", keyID, "proxy", config.RedactURL(proxy.name), "duration_ms", attemptDuration.Milliseconds(), "error", err)
 		} else {
@@ -871,11 +888,7 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 		}
 		leg := label + ":"
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				leg += "timeout"
-			} else {
-				leg += "transport"
-			}
+			leg += classifyAttemptError(err)
 		} else {
 			leg += strconv.Itoa(status)
 		}
@@ -898,8 +911,6 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 
 func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + wire.Path(protocol)
-	// Keep the body a *bytes.Reader so NewRequest sets ContentLength: a
-	// known length avoids chunked upload encoding upstream.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err

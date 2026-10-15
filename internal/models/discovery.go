@@ -73,6 +73,17 @@ type Metadata struct {
 	StructuredOutput bool     `json:"structured_output,omitempty"`
 	InputModalities  []string `json:"input_modalities,omitempty"`
 	OutputModalities []string `json:"output_modalities,omitempty"`
+	// Cost is filled from models.dev at read time, in USD per million tokens.
+	Cost *Cost `json:"cost,omitempty"`
+}
+
+// Cost is the published per-million-token price of a model. A nil field means
+// the metadata did not state it.
+type Cost struct {
+	Input      *float64 `json:"input,omitempty"`
+	Output     *float64 `json:"output,omitempty"`
+	CacheRead  *float64 `json:"cache_read,omitempty"`
+	CacheWrite *float64 `json:"cache_write,omitempty"`
 }
 
 func (m *capabilityModel) metadata() Metadata {
