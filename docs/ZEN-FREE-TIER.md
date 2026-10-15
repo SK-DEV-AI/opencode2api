@@ -62,6 +62,15 @@ no credential bill as `anonymous`. Usage is still tracked per request
   lane (anon + keys) even in perfect `ses_` shape. Upstream #70, ported as
   fork `7b458a2`: re-encode foreign time parts to descending layout
   (counter 1 → `ffe` suffix), pass genuine descending IDs through.
+- Since 2026-10-14 it ALSO fingerprints the whole client (fork `3c249b6`
+  ports upstream f8e996d/be91f86/0204ca1): keyless endpoint moved to
+  `https://opencode.ai/inference`; UA must be `opencode/latest/<ver>/cli`;
+  `x-opencode-session-id` must duplicate the session; `x-opencode-project`
+  must be bare 40-hex (`prj_*` 403s); `x-opencode-request` must be ABSENT;
+  every recognised tool must carry the genuine CLI definition byte-for-byte
+  (`shell`, not `bash`). Any single miss = 403 on all lanes, legs ~1s each.
+  Distinguish from quota: quota 429s with Retry-After; this gate 403s fast
+  on every key simultaneously.
 
 ## What this means for the proxy (all keys are free, no paid tier)
 
