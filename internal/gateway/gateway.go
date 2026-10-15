@@ -515,9 +515,10 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		// The anonymous free tier only serves agent-shaped streaming requests
 		// (anything else is rejected with 403 FreeTierError). Shape the Zen
 		// payload on the map here so the body marshals once: the anon lane
-		// below sends bodies[zen] verbatim, and key lanes compare against
-		// the shaped form. Go bodies keep their original shape.
-		if tier == config.TierZen {
+		// below sends bodies[zen] verbatim. Paid Zen bodies are deliberately
+		// left alone; only free models take the agent shape. Go bodies keep
+		// their original shape.
+		if tier == config.TierZen && g.catalog.IsFreeModel(route.ID) {
 			shapeAnonymousPayload(upstreamPayload, protocol)
 		}
 		encoded, err := json.Marshal(upstreamPayload)
