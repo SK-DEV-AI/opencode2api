@@ -23,7 +23,7 @@ func probeFixture(t *testing.T, zenURL string) *Gateway {
 		Prefer:     config.TierZen,
 		ZenKeys:    []string{"zen-key-1"},
 		Retry:      config.RetryConfig{MaxAttempts: 6, TimeoutSeconds: 30},
-		Upstream:   config.UpstreamConfig{Zen: zenURL, Go: zenURL},
+		Upstream:   config.UpstreamConfig{Zen: zenURL, Go: zenURL, Anonymous: zenURL},
 		Models:     config.ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{"test-offline-free": "chat"}},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

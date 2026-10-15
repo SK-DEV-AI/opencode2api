@@ -51,7 +51,7 @@ func replayFixture(t *testing.T, hits []replayHit) (*Gateway, *telemetry.Monitor
 		Anonymous:  true,
 		Prefer:     config.TierZen,
 		Retry:      config.RetryConfig{MaxAttempts: 6, TimeoutSeconds: 30},
-		Upstream:   config.UpstreamConfig{Zen: upstream.URL, Go: upstream.URL},
+		Upstream:   config.UpstreamConfig{Zen: upstream.URL, Go: upstream.URL, Anonymous: upstream.URL},
 		Models:     config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

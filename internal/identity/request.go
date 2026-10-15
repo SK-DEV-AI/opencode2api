@@ -24,6 +24,7 @@ type RequestIDs struct {
 func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 	signal := jsonutil.FirstString(
 		r.Header.Get("x-opencode-session"),
+		r.Header.Get("x-opencode-session-id"),
 		r.Header.Get("x-session-affinity"),
 		r.Header.Get("X-Session-Id"),
 		r.Header.Get("x-session-id"),
