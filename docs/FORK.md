@@ -185,7 +185,16 @@ byte-identical, build+vet+gateway green.
 
 - **What:** `prepareRouteBodies` shapes the Zen payload on the decoded map (`shapeAnonymousPayload`: stream + usage + agent tools) before the single per-tier marshal. The anon lane sends `bodies[zen]` verbatim — the old 2nd serde pass in `doAnonymousUpstream` (unmarshal + remarshal) is deleted. `prepareAnonymousBody` (bytes form) stays for probes + Go-tier key shaping, now a thin wrapper over the same map function.
 - **Collapse flag:** `shapeKeyBody` on Zen returns shaped=true structurally (Zen bodies are always pre-shaped; collapse only runs for non-stream clients whose payloads always needed forcing, so the old bytes-compare was always true there too). Go/SystemOne paths unchanged.
+- **Paid-model gate** (2026-10-15, maintainer #79 feedback): shaping block gated on `IsFreeModel(route.ID)` — paid Zen bodies keep exact client shape. Same fix applied to upstream PR #79 revision.
 - **Proof:** temp byte-equivalence test passed on all shapes (stream/non-stream x tools/no-tools + SystemOne passthrough, then removed), full suite + `-race` green, live deploy healthy, non-stream smoke returns clean collapse with usage, 28/28 success post-deploy.
+
+### v1.4.0 merge (2026-10-15, commit `9217afe`, live, pushed)
+
+- **Took upstream:** gate hardening `f8e996d`/`be91f86`/`0204ca1` (client fingerprint, inference endpoint, genuine tools — Cline's `3c249b6` port verified content-identical, tools JSON formatting-only delta), #59 anon cooldown lockup, #63 token floor, #64 whole-attempt deadline (our 15s `attempt_timeout_seconds` now bounds dial+write+headers+first-event; legs show `attempt_timeout_headers:15000ms` with phase attribution), #62 tool images, #58 server-key usage split (`server_key_id` live in logs), #65/#66 models surface, plus our merged #76/#77/#78.
+- **Kept local:** zero-delivery replay + length rescue + heartbeat + stop/tail census, offline `no_upstream_contact` guard, single-marshal shaping with paid gate, tcp4 + TLS resumption, RandomID fallback, refresh `WithTimeout` (PR #80 closed per maintainer — right fix is gateway-lifetime context, kept locally pending rework).
+- **Merge resolutions:** telemetry took upstream (their LRU session cap beats our smallest-first; server-key split is a superset); CloneMap took upstream's merged comment; `doUpstream` keeps upstream 3-value signature with a new `doUpstreamCounted` wrapper for replay leg continuity; ring test retargeted at upstream concrete types; tools JSON took upstream Prettier form (content-identical).
+- **PR updates:** #80 closed with reason, #79 rebuilt fresh on new main with paid gate + paid byte-identical proof, maintainer replied. #76/#77/#78 merged.
+- **Proof:** vet clean, full suite green, healthz ready 86/73, live smoke 200 with collapse+usage, 106/109 success post-deploy (1 stream_error, 2 upstream-500s across all lanes — provider-side, phase-attributed legs prove failover worked).
 
 ## Consumers
 
