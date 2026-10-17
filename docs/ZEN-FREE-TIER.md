@@ -71,6 +71,16 @@ no credential bill as `anonymous`. Usage is still tracked per request
   (`shell`, not `bash`). Any single miss = 403 on all lanes, legs ~1s each.
   Distinguish from quota: quota 429s with Retry-After; this gate 403s fast
   on every key simultaneously.
+- **Two anonymous lanes, two tool-bar shapes (upstream v1.4.1, 2026-10-17,
+  commits `2319941` + `a9470df`):** the legacy `https://opencode.ai/zen/v1`
+  endpoint accepts a LIGHTER agent shape — one genuine `read` tool is
+  enough, and other client tools may be sent through as-is (upstream
+  aliases the client read tool to `read` and stubs nothing else).
+  `/inference` still wants the full recognised tool set. Both lanes were
+  measured returning 200 for shaped anonymous free-tier traffic from this
+  box, so the proxy tries legacy `/zen/v1` first and falls back to
+  `/inference`. A 403 naming tools on one lane is a shaping problem, not a
+  quota problem — check which lane the leg used before blaming the bucket.
 
 ## What this means for the proxy (all keys are free, no paid tier)
 

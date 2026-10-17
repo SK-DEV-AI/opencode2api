@@ -1,4 +1,4 @@
-# opencode2api fork — agent context (maintained by agent, 2026-10-15)
+# opencode2api fork — agent context (maintained by agent, 2026-10-17)
 
 ## Session hygiene (proven 2026-10-10 — jcode source-read, not vibes)
 - The "Session history: X tokens processed" warning counts LIFETIME cumulative tokens, not current context (`crates/jcode-tui/src/tui/ui_input.rs:617`, comment says "This is not current context usage"). First appears after one full context window of lifetime work. Compaction never resets it. Only `/clear` does.
@@ -43,7 +43,7 @@
 - Tool verdict: serena trialed 2026-10-09 (`uv tool install serena-agent` + gopls, indexed 59 Go files in ~8s, `POST /query_project` proven: accurate symbols on unread `admin/server.go`, all `probeFreeModel` callers with line numbers). CORRECTION 2026-10-09: jcode DOES have full MCP client support (`~/.jcode/mcp.json` registry + `--mcp-tools` flags; websearch/codesearch/mc-bridge all served from there) — my earlier "no MCP surface" claim was wrong. Serena wiring into the registry under test; KEEP `.serena/` index dirs out of the repo regardless. WIRED 2026-10-09: `serena` entry live in `~/.jcode/mcp.json` (wrapper `~/session-root/repos/serena-mcp/run`, gopls symlinked to `~/.local/bin`), MCP tools confirmed in-harness (`activate_project` + `get_symbols_overview` proven on never-opened `telemetry/metrics.go`).
 
 ## Repo/service
-- Repo: `~/session-root/repos/opencode2api`, branch `feat/observe-v130`, HEAD `3c249b6`. Pushed to fork. Clean. Backup `backup-pre-rebase-20261007`.
+- Repo: `~/session-root/repos/opencode2api`, branch `feat/observe-v130`, HEAD `d2c694c` (v1.4.1 merged + dedup follow-up, live). Pushed to fork. Clean. Backups: `backup-pre-rebase-20261007`, `backup-pre-v140-20251015`, `backup-pre-v141-20251017`; binary rollback `opencode2api.prev`.
 - Deploy ritual: `systemctl --user stop opencode2api`, `cp <new-binary> ./opencode2api`, `systemctl --user start opencode2api`, then `curl -sf http://127.0.0.1:8787/healthz` (`ready:true`, total ~84 / exposed ~75).
 - A `400 ... is disabled after a failed availability check` is the catalog guard (`catalog.go routeLocked`), not a crash.
 - Log reading: `duration_ms` = total downstream time; `legs` = per-attempt `key:status:ms` (headers timing ONLY — silence after headers is model thinking, invisible in legs); `outcome` success/client_canceled/stream_error; `in/out 0/0` on cancels = no usage frame arrived (expected); empty `stop` + canceled = killed while thinking.
@@ -55,17 +55,19 @@
 - Muse verdict (NOT proxy): "loads forever" = thinking + 160-200K ctx; legs `anon:200:3-9s` then 184s `client_canceled` (jcode gave up first); small-ctx = fast; high > xhigh.
 - Suffix naming (NOT proxy): `-free` is upstream naming; free = models.dev `0/0` (big-pickle) OR name substring; jev-1.13/sota/sweet route via key lanes.
 - C (`2f65507`): offline boot probed immediately, `transport_error` persisted `disabled:true` 24h. Fix: no-HTTP-response probes return unattempted (`no_upstream_contact`), state untouched. Also shrank `/v1/models` (disabled hidden) → thin jcode selector; force jcode re-discovery if needed.
-- D (`95132b5`, serena audit): `verifyProxyAfterError` WithoutCancel leaked 10s checks past disconnect → now `WithTimeout(ctx)`. Heartbeat stop verified CORRECT (data-only handler). Cursors/rotation/quota/panics/dead-code clean. First-event gate stays `0`.
+- D (`95132b5`, serena audit): `verifyProxyAfterError` WithoutCancel leaked 10s checks past disconnect → became `WithTimeout(ctx)`. **SUPERSEDED 2026-10-17 (v1.4.1 merge): the fork's `WithTimeout` variant was upstream PR #80, closed because proxy health is gateway-scoped, so a cancelled client request must not abort the check. Back on `context.WithoutCancel(ctx)`; `refresh_test.go::TestVerifyProxyAfterErrorOutlivesRequestCancel` pins that. The only real fix, if ever needed, is a gateway-lifetime context.** Heartbeat stop verified CORRECT (data-only handler). Cursors/rotation/quota/panics/dead-code clean. First-event gate stays `0`.
+- E (2026-10-17, v1.4.1 merge): the anonymous lane is now an ordered LIST per proxy, legacy first — `https://opencode.ai/zen` (legacy `/zen/v1` gate, leaner shaping via `ensureLegacyAnonymousReadTool`: one `read` tool is enough, other client tools pass through) then `upstream.anonymous` (`/inference`, full tool set). Both lanes measured 200 for shaped anon traffic from this box; production confirmed serving on `/zen` (`anon:200:844ms`, attempt 1, zero lane-failure events). Fork guard: the hardcoded public legacy origin is only prepended when `upstream.anonymous` is on the same host — otherwise a mirror/test origin would silently receive the traffic (that bug made `TestProbeOfflineIsUnattempted` hit the real internet). `anonymous_lanes_test.go` pins both. When debugging anon latency remember a failed lane costs a full attempt timeout before the next lane is tried.
 - SIGKILL on restart EXPECTED (`TimeoutStopUSec=10s` < minute streams; stateless, clients retry).
 
 ## Request path (code)
-- `cmd/opencode2api/main.go` → `RuntimeManager.Handler` → `telemetry.Middleware` (meta, request_routed line) → `authenticate` (server_keys) → `handleInference(external)` → `catalog.Route` → `prepareRouteBodies` (per-tier bodies) → `doUpstream`/`doUpstreamWithOffset` → `serveOne` (passthrough if same protocol else transcode) → stream or collapse/convert.
+- `cmd/opencode2api/main.go` → `RuntimeManager.Handler` → `telemetry.Middleware` (meta, request_routed line) → `authenticate` (server_keys) → `handleInference(external)` → `catalog.Route` → `prepareRouteBodies` (per-tier bodies, NO anon shaping here since v1.4.1) → `doUpstreamCounted` → `serveOne` (passthrough if same protocol else transcode) → stream or collapse/convert.
 - `forwardSystemOne`: raw `io.Copy`, no reset recovery. Deliberate gap.
-- `doUpstream` returns attempt count; replay continues numbering via offset. Failed replay emits replay's outcome, not suppressed first cause. Double reset (replay resets too) emits error frame, no second replay.
-- Header-phase client disconnect → 499 `client_canceled` (both inference + systemone paths), not 502.
+- `doUpstreamCounted` returns attempt count; replay continues numbering via offset. Failed replay emits replay's outcome, not suppressed first cause. Double reset (replay resets too) emits error frame, no second replay. Upstream's 3-value `doUpstream` is a thin wrapper over it.
+- Header-phase client disconnect → 499 `client_canceled` (both inference + systemone paths), not 502. Upstream's block is guarded with `!errors.Is(err, context.DeadlineExceeded)` so a deadline+cancel reports 504, not 499. Do not re-add a second copy after this block (the v1.4.1 auto-merge left one; removed in `d2c694c`).
 
 ## Upstream attempt loop
-- Anonymous first (public credential, agent-shaped body via `prepareAnonymousBody`: stream+tools+include_usage), then KeyTiers in prefer order, max_attempts per tier.
+- Anonymous first (public credential `Bearer public`), then KeyTiers in prefer order, max_attempts per tier.
+- Anon bodies are shaped per LANE inside `doAnonymousUpstream` via `prepareAnonymousBody(body, protocol, legacy)` — legacy `/zen/v1` gets the single-`read` tool stub (other client tools pass through, tool-call names aliased back by `RenameStreamReader`/`RenameResponseTool`), `/inference` gets the full `opencode_tools.json` set. `isLegacyZenUpstream(baseURL)` picks the shape; `anonymousUpstreams()` picks the order. Key tiers keep their own `shapeKeyBody`.
 - Non-retryable 4xx (not 401/403/429) exits tier. Transport/5xx/429 rotate. Retry-After honored. Cooldowns exponential to 8x base.
 - Stale `rs_*` reasoning refs: one stripped replay, session preserved, Responses-only.
 - `recordUpstreamAttempt` appends `key:status:ms` legs (`anon` label, `timeout`/`transport` for errors) + monitor ring.

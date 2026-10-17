@@ -4,12 +4,12 @@ Local proxy that bridges AI harnesses (opencode, Pi, jcode) to OpenCode's Zen ga
 
 ## Fork
 
-- **Upstream:** [jasonxu114514/opencode2api](https://github.com/jasonxu114514/opencode2api) v1.3.5 (`79a208a`, released 2026-09-23)
+- **Upstream:** [jasonxu114514/opencode2api](https://github.com/jasonxu114514/opencode2api) v1.4.1 (`a9470df`, released 2026-10-17) — fully merged, `git merge-base --is-ancestor origin/main HEAD` holds
 - **Fork:** [SK-DEV-AI/opencode2api](https://github.com/SK-DEV-AI/opencode2api) branch `feat/observe-v130`
-- **Local merge:** `cee34a4` — v1.3.5 merged into `feat/observe-v130` 2026-09-25, all unique local patches preserved
-- **Backup:** tag `backup-pre-v135-20260925` + branch `backup-feat-observe-v130-20260925`
+- **Local merge history:** `cee34a4` (v1.3.5, 2026-09-25) → `f415dbf`+`7208546` (v1.3.7, 2026-10-10) → `9217afe` (v1.4.0, 2026-10-15) → `cbd4e02`+`d2c694c` (v1.4.1, 2026-10-17)
+- **Backup:** tags `backup-pre-v135-20260925`, `backup-pre-v140-20251015`, `backup-pre-v141-20251017`; binary rollback copy `opencode2api.prev` in the repo root
 - **Base:** v1.3.0 (`46def7f`); local branch was at `4437b64` before the v1.3.5 merge
-- **Upstream state 2026-10-04:** `origin/main` still v1.3.5 (`79a208a`), zero new commits — fully current. 4 PRs open (#46 docs, #48 error logs, #49 dead code, #50 ledger). #47 (example default) withdrawn — argued against an explicit maintainer default without measured evidence. Old #32 closed as superseded with review responses. Rescue/replay (patches 3, 5, 6 + Delivered fix + double-reset emit) stay local pending live evidence.
+- **Upstream state 2026-10-17:** `origin/main` = v1.4.1 (`a9470df`) — the legacy `/zen/v1` lane work (`2319941` request shape + stub tools, `a9470df` read-tool aliasing) is merged. PRs #76/#77/#78 merged; #79 (single-marshal shaping) still open and now superseded by upstream's per-lane `prepareAnonymousBody`; #80 (request-bound proxy check) closed as the wrong fix.
 - **Zen research:** `ZEN-FREE-TIER.md` (write-once, from `sst/opencode@907b3bc` source). All keys are free; anonymous IP buckets are the engine, free keys the seatbelt.
 
 ### Already upstreamed (safe to drop, do not re-apply)
@@ -145,11 +145,11 @@ Restart=on-failure
 
 **Build:** `cd ~/session-root/repos/opencode2api && go vet ./... && gofmt -l cmd internal webui && go build -o opencode2api ./cmd/opencode2api` (binary is gitignored; stop the service before `cp` or you get `Text file busy`)
 
-**Health:** `curl -s http://127.0.0.1:8787/healthz` — 2026-10-10: `ok`, ready, 83 total / 75 exposed, 6 zen keys, anonymous on
+**Health:** `curl -s http://127.0.0.1:8787/healthz` — 2026-10-17 (v1.4.1 merge): `ok`, ready, 85 total / 72 exposed. There is no `/readyz` route (404 by design) — readiness is the `ready` field inside `/healthz`.
 
 **Logs:** `journalctl --user -u opencode2api -f` (look for `legs`, `stop`, `cached`, `stream_zero_replay`)
 
-**Note:** the v1.3.5 merge (`cee34a4`) was local-only at first; the fork remote has since been pushed (branch `feat/observe-v130` is fully on `fork`).
+**Note:** every merge so far is on the fork remote (`branch feat/observe-v130`); nothing is ever pushed upstream or to `origin/main`. `origin/main` is upstream (`jasonxu114514/opencode2api`), the fork remote is `fork` (`SK-DEV-AI/opencode2api`) — verify with `git remote -v` before any push.
 
 **Merging upstream releases:** `./merge-upstream.sh` (repo root, committed
 2026-10-13). Check-only by default: fetches origin, lists incoming commits,
@@ -191,10 +191,20 @@ byte-identical, build+vet+gateway green.
 ### v1.4.0 merge (2026-10-15, commit `9217afe`, live, pushed)
 
 - **Took upstream:** gate hardening `f8e996d`/`be91f86`/`0204ca1` (client fingerprint, inference endpoint, genuine tools — Cline's `3c249b6` port verified content-identical, tools JSON formatting-only delta), #59 anon cooldown lockup, #63 token floor, #64 whole-attempt deadline (our 15s `attempt_timeout_seconds` now bounds dial+write+headers+first-event; legs show `attempt_timeout_headers:15000ms` with phase attribution), #62 tool images, #58 server-key usage split (`server_key_id` live in logs), #65/#66 models surface, plus our merged #76/#77/#78.
-- **Kept local:** zero-delivery replay + length rescue + heartbeat + stop/tail census, offline `no_upstream_contact` guard, single-marshal shaping with paid gate, tcp4 + TLS resumption, RandomID fallback, refresh `WithTimeout` (PR #80 closed per maintainer — right fix is gateway-lifetime context, kept locally pending rework).
+- **Kept local:** zero-delivery replay + length rescue + heartbeat + stop/tail census, offline `no_upstream_contact` guard, single-marshal shaping with paid gate, tcp4 + TLS resumption, RandomID fallback, refresh `WithTimeout` (PR #80 closed per maintainer — right fix is gateway-lifetime context, kept locally pending rework). *(The `WithTimeout` variant was retired in the v1.4.1 merge below; the rest still stand.)*
 - **Merge resolutions:** telemetry took upstream (their LRU session cap beats our smallest-first; server-key split is a superset); CloneMap took upstream's merged comment; `doUpstream` keeps upstream 3-value signature with a new `doUpstreamCounted` wrapper for replay leg continuity; ring test retargeted at upstream concrete types; tools JSON took upstream Prettier form (content-identical).
 - **PR updates:** #80 closed with reason, #79 rebuilt fresh on new main with paid gate + paid byte-identical proof, maintainer replied. #76/#77/#78 merged.
 - **Proof:** vet clean, full suite green, healthz ready 86/73, live smoke 200 with collapse+usage, 106/109 success post-deploy (1 stream_error, 2 upstream-500s across all lanes — provider-side, phase-attributed legs prove failover worked).
+
+### v1.4.1 merge (2026-10-17, commits `cbd4e02` + `d2c694c`, live, pushed)
+
+- **Took upstream:** the anonymous-lane rewrite — `doAnonymousUpstream` now walks an ordered upstream list per proxy and shapes each lane's body with `prepareAnonymousBody(body, protocol, legacy)` (`ensureLegacyAnonymousReadTool` for the legacy `/zen/v1` gate, `ensureAnonymousTools` for `/inference`), replacing the fork's map-level `shapeAnonymousPayload` (v1.4.1 also removes it upstream). Plus the WebUI rewrite (CSS/JS split, i18n, new pages), config `pool+` proxy entries and `proxy_test.go`, httpx client, models discovery, protocol request/response.
+- **Lane order measured, not assumed:** both lanes answer 200 for shaped anonymous free-tier traffic from this box (`space-bunny-free` 0.7-10.3s, `deepseek-v4.1-flash-free` 1.3-2.2s, `beam-free` 0.5-0.7s per lane, direct, no proxy). So upstream's legacy-first order is kept, and production was confirmed on it: an isolated scratch instance running the merged binary served `space-bunny-free` on `https://opencode.ai/zen` at `anon:200:844ms` on attempt 1 with zero `anonymous_attempt_response_failed` events.
+- **Local guard on the lane list `(cbd4e02)`:** `anonymousUpstreams()` prepends the hardcoded public `models.LegacyZenBase` only when `upstream.anonymous` resolves to the same host (`sameHost`). Without it a self-hosted/mirrored anonymous origin, or any test fixture, silently sent free-tier traffic to a third-party origin — this is what made `TestProbeOfflineIsUnattempted` reach the real internet and lose its `no_upstream_contact` verdict. Pinned by `internal/gateway/anonymous_lanes_test.go` (3 tests).
+- **Kept local (all verified present post-merge):** zero-delivery replay with leg continuation (`doUpstreamCounted` restored on top of upstream's 3-value `doUpstream`; the replayed body is wrapped in `RenameStreamReader` like the first attempt so tool aliases stay correct), length rescue, SSE heartbeat, stop/tail census, offline `no_upstream_contact` probe guard, tcp4 dial pin + TLS session resumption (merged with upstream's pool rules: `ForceAttemptHTTP2`/`DisableKeepAlives`/empty `TLSNextProto`/HTTP1.1 ALPN for pool entries), `RandomID` math/rand fallback, `EmitStreamError`, consumer docs.
+- **Retired local divergence (converged back to upstream):** the request-bound proxy health check. PR #80 was closed because proxy health is gateway-scoped, so `verifyProxyAfterError` is back on `context.WithoutCancel(ctx)`; `refresh_test.go` now pins *that* semantics (`TestVerifyProxyAfterErrorOutlivesRequestCancel`: cancel mid-check leaves the check running, and it still releases the `checking` flag on its own). Also deleted a duplicated 499 block the auto-merge left behind in both request paths (`d2c694c`) — upstream's guarded block runs first and deliberately reports 504 when the deadline expired.
+- **Gates:** `gofmt -l cmd internal` clean, `go vet ./...` clean, `go test -count=1 ./...` green (gateway 25 tests incl. 3 replay end-to-end, 12 stream-lane semantics, 2 probe, 3 lane-order), `go build -trimpath ./cmd/opencode2api`.
+- **Deploy + live proof:** stopped service, swapped binary (backup `opencode2api.prev`), healthz `ready:true` 85 total / 72 exposed, models.dev metadata 140 + catalog 72 refreshed, live stream smoke 200 with usage + `[DONE]` in 1.3s, non-stream free-model smoke 200 in 1.0s, real harness traffic flowing 200s on both key and anonymous lanes, 0×403/401.
 
 ## Consumers
 
