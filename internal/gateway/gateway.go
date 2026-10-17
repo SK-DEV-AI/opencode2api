@@ -266,6 +266,10 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			copyErrorResponse(w, external, resp, ids.Request)
 			return
 		}
+		var toolAlias string
+		if meta != nil {
+			toolAlias = meta.ToolAlias
+		}
 		if stream {
 			if meta != nil {
 				meta.Stream = true
@@ -278,6 +282,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
+			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
 			var usage wire.Usage
 			var usageReported bool
 			// serveOne streams a single upstream attempt downstream on the
@@ -297,7 +302,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				}
 				return served, reported, streamErr
 			}
-			usage, usageReported, err = serveOne(upstreamRoute, resp.Body)
+			usage, usageReported, err = serveOne(upstreamRoute, streamBody)
 			// ponytail: zero-delivery reset replay. Upstream cut the
 			// stream before anything reached downstream (Cloudflare
 			// shed during the thinking phase). The client saw
@@ -312,7 +317,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 					defer retryResp.Body.Close()
 					upstreamRoute = retryRoute
 					spent = total
-					usage, usageReported, err = serveOne(upstreamRoute, retryResp.Body)
+					usage, usageReported, err = serveOne(upstreamRoute, wire.RenameStreamReader(retryResp.Body, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias))
 					if meta != nil {
 						meta.Tier = string(upstreamRoute.Tier)
 						meta.Protocol = upstreamRoute.Protocol
@@ -383,6 +388,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			}
 			responseBody = collapsed
 		}
+		responseBody = wire.RenameResponseTool(responseBody, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
 			meta.Usage, meta.UsageReported = usage, reported
 		}
@@ -571,15 +577,10 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		if effort := g.resolvedEffort(jsonutil.StringAt(upstreamPayload, "model"), tier, protocol); effort != "" {
 			wire.ForcedEffort(protocol, upstreamPayload, effort)
 		}
-		// The anonymous free tier only serves agent-shaped streaming requests
-		// (anything else is rejected with 403 FreeTierError). Shape the Zen
-		// payload on the map here so the body marshals once: the anon lane
-		// below sends bodies[zen] verbatim. Paid Zen bodies are deliberately
-		// left alone; only free models take the agent shape. Go bodies keep
-		// their original shape.
-		if tier == config.TierZen && g.catalog.IsFreeModel(route.ID) {
-			shapeAnonymousPayload(upstreamPayload, protocol)
-		}
+		// Anonymous-lane shaping now lives upstream-side in
+		// prepareAnonymousBody: v1.4.1 reshapes per upstream lane for the
+		// legacy /zen/v1 vs /inference split, so a map-level pre-shape
+		// would be overwritten for the lane that needs it most.
 		encoded, err := json.Marshal(upstreamPayload)
 		if err != nil {
 			return nil, errors.New("request contains unsupported JSON values")

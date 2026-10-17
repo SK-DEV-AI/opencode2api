@@ -18,10 +18,12 @@ const (
 )
 
 // syncProxyResult updates proxy health from real traffic. Only timeouts and
-// connection refusals mark a proxy unavailable. Other errors and 4xx/5xx
-// responses trigger a neutral URL check without being treated as proxy failure.
+// connection refusals mark a proxy unavailable. Any HTTP response — including
+// 4xx/5xx — proves the route is reachable and restores a proxy evicted by an
+// earlier transient failure, so a rate-limited exit is never blamed on the
+// proxy route itself.
 func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, status int, err error) bool {
-	if proxy == nil {
+	if proxy == nil || proxy.pool {
 		return false
 	}
 	if isProxyFailure(err) {
@@ -36,12 +38,19 @@ func (g *Gateway) syncProxyResult(ctx context.Context, proxy *proxyTransport, st
 		}
 		return false
 	}
+	if err == nil && status >= 400 && status < 600 {
+		// Receiving an HTTP status from the upstream proves the proxy route
+		// itself is reachable; restore an unhealthy flag left by an earlier
+		// transient timeout instead of keeping the route evicted.
+		wasHealthy := proxy.healthy.Swap(true)
+		if !wasHealthy {
+			g.restoreProxy(proxy)
+		}
+		return false
+	}
 	if err != nil {
 		g.verifyProxyAfterError(ctx, proxy, status)
 		return false
-	}
-	if status >= 400 && status < 600 {
-		g.verifyProxyAfterError(ctx, proxy, status)
 	}
 	return false
 }
@@ -50,14 +59,15 @@ func (g *Gateway) verifyProxyAfterError(ctx context.Context, proxy *proxyTranspo
 	if !proxy.checking.CompareAndSwap(false, true) {
 		return
 	}
-	// Bound the check to the caller's lifetime plus the check timeout: a
-	// detached context (context.WithoutCancel) let verifications outlive
-	// client disconnects and server shutdown, running the full 10s against
-	// a dead network and serializing on the checking flag. The timeout
-	// still caps a hung check; cancellation just ends a pointless one.
-	checkCtx, cancel := context.WithTimeout(ctx, proxyHealthCheckTimeout)
+	// The client request may finish or be cancelled while the verification is
+	// running. Keep its values but give the proxy check an independent timeout.
+	// (Fork note: the earlier request-bound, WithTimeout variant was the shape
+	// of upstream PR #80, which was closed on exactly this reasoning: proxy
+	// health is gateway-scoped, so a cancelled client request must not abort
+	// the check. The real fix, if it is ever needed, is a gateway-lifetime
+	// context instead of either request lifetime or full detachment.)
+	checkCtx := context.WithoutCancel(ctx)
 	go func() {
-		defer cancel()
 		result := g.transports.checkClaimedProxy(checkCtx, proxy, proxyHealthCheckURL, proxyHealthCheckTimeout)
 		g.applyProxyHealthResult(result, "upstream HTTP response", status)
 	}()
@@ -220,17 +230,25 @@ func (g *Gateway) refreshZen(ctx context.Context) []string {
 func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []string {
 	cursor := g.anonymous.CursorFor("")
 	limit := g.anonymous.Len()
+	if g.anonymous.HasPool() && g.cfg.Retry.MaxAttempts > limit {
+		limit = g.cfg.Retry.MaxAttempts
+	}
 	for attempt := 1; attempt <= limit; attempt++ {
 		node := cursor.Next()
 		if node == nil {
 			break
 		}
 		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		models, status, err := modelcatalog.FetchModels(refreshCtx, node.proxy.client, base, anonymousZenKey)
-		if err != nil && status == 404 {
-			// The new inference backend does not expose a models listing;
-			// probe the legacy Zen console origin once before giving up.
-			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, modelcatalog.LegacyZenBase, anonymousZenKey)
+		var models []string
+		var status int
+		var err error
+		// Prefer the legacy /zen/v1 models listing before falling back to the
+		// configured anonymous upstream.
+		for _, upstream := range g.anonymousUpstreams() {
+			models, status, err = modelcatalog.FetchModels(refreshCtx, node.proxy.client, upstream, anonymousZenKey)
+			if err == nil {
+				break
+			}
 		}
 		g.syncProxyResult(refreshCtx, node.proxy, status, err)
 		cancel()

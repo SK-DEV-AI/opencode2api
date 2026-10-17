@@ -20,16 +20,18 @@ func testPerformanceConfig() config.PerformanceConfig {
 	}
 }
 
-// TestVerifyProxyAfterErrorRespectsCancel proves the 2026-10-09 fix: a proxy
-// verification must not outlive its caller's context. Before the fix the
-// check ran on context.WithoutCancel, so every client disconnect left a 10s
-// health check running against a dead network while holding the checking
-// flag and serializing later verifications.
-func TestVerifyProxyAfterErrorRespectsCancel(t *testing.T) {
+// TestVerifyProxyAfterErrorOutlivesRequestCancel pins the v1.4.1 merge
+// decision: proxy verification is gateway-scoped state, so a cancelled client
+// request must not abort it. Upstream PR #80 (the request-bound WithTimeout
+// variant this fork carried) was closed on exactly that reasoning, and the
+// fork follows upstream again. The check is still bounded: it ends on its own,
+// capped by proxyHealthCheckTimeout, and never leaks the checking flag.
+func TestVerifyProxyAfterErrorOutlivesRequestCancel(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Slower than the test's cancel: if the check ignores cancellation
-		// it will still be in-flight when we assert.
-		time.Sleep(5 * time.Second)
+		// Slower than the cancel below: if the check honoured cancellation the
+		// flag would be released right after the cancel instead of at the end
+		// of this sleep.
+		time.Sleep(1 * time.Second)
 	}))
 	t.Cleanup(slow.Close)
 	pool, err := newTransportPool([]string{slow.URL}, testPerformanceConfig(), time.Second)
@@ -42,14 +44,17 @@ func TestVerifyProxyAfterErrorRespectsCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	gw.verifyProxyAfterError(ctx, proxy, 500)
 	// The check claimed the flag; cancel while it is still in-flight.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	cancel()
-	// A cancel-respecting check releases the flag quickly. The old detached
-	// check held it for the full 5s server sleep.
+	time.Sleep(300 * time.Millisecond)
+	if !proxy.checking.Load() {
+		t.Fatalf("request cancel aborted the proxy verification; a cancelled client request must not end a gateway-scoped health check")
+	}
+	// The check must still finish by itself instead of leaking the flag.
 	deadline := time.Now().Add(3 * time.Second)
 	for proxy.checking.Load() {
 		if time.Now().After(deadline) {
-			t.Fatalf("proxy checking flag still held 3s after cancel; verification ignores context cancellation")
+			t.Fatalf("proxy checking flag still held 3s after the check should have finished")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
