@@ -171,14 +171,7 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 			g.logger.Warn("OpenCode capability catalog refresh failed", "component", "models", "event", "capability_refresh_failed", "error", capabilitiesErr)
 		}
 		if zen != nil || goModels != nil {
-			g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)
-			g.syncRotation()
-			if ctx.Err() == nil {
-				if err := g.catalog.SaveCache(); err != nil {
-					g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)
-				}
-			}
-			g.logger.Info("model catalog refreshed", "component", "models", "event", "catalog_refreshed", "models", len(g.catalog.List()))
+			g.applyModelRefresh(ctx, zen, goModels, capabilities, capabilitiesErr)
 		}
 	}
 	go func() {
@@ -194,6 +187,39 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// applyModelRefresh commits one refresh cycle. It is split out of
+// StartModelRefresh's closure so the failure semantics stay testable.
+//
+// The model lists and the capability snapshot come from separate upstreams. On
+// a capability fetch failure, capabilities is the zero value: every Protocol,
+// Unsupported and Metadata map is nil, and ReplaceWithCapabilities reads nil as
+// "this release supports nothing". Passing that in wiped the catalog on every
+// transient capability outage (2026-10-18: 85 -> 44 total, 72 -> 35 exposed
+// for two hours) and turned the dropped models into a misleading 400 ("the
+// model uses an upstream protocol that opencode2api does not expose").
+//
+// ReplaceWithCapabilities already skips nil arguments, so passing nil on the
+// failure path keeps the last good protocol and metadata snapshot. The model
+// lists are still applied either way, so a genuinely removed model still drops
+// out — this only protects against a failure that carries no information.
+func (g *Gateway) applyModelRefresh(ctx context.Context, zen, goModels []string, capabilities modelcatalog.Capabilities, capabilitiesErr error) {
+	if capabilitiesErr != nil {
+		g.catalog.ReplaceWithCapabilities(zen, goModels, nil, nil, nil)
+	} else {
+		g.catalog.ReplaceWithCapabilities(zen, goModels, capabilities.Protocols, capabilities.Unsupported, capabilities.Metadata)
+	}
+	if ctx.Err() == nil {
+		if err := g.catalog.SaveCache(); err != nil {
+			g.logger.Warn("model catalog cache write failed", "component", "models", "event", "catalog_cache_write_failed", "error", err)
+		}
+	}
+	// A nil manager only happens in tests that drive applyModelRefresh directly.
+	if g.rotation != nil {
+		g.syncRotation()
+	}
+	g.logger.Info("model catalog refreshed", "component", "models", "event", "catalog_refreshed", "models", len(g.catalog.List()))
 }
 
 func (g *Gateway) refreshProtocolCapabilities(ctx context.Context) (modelcatalog.Capabilities, error) {
