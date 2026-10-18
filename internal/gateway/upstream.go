@@ -27,6 +27,56 @@ import (
 	"opencode2api/internal/telemetry"
 )
 
+// logUpstreamErrorBody emits a capped, secret-scrubbed snippet of a non-2xx
+// upstream body. Reading and restoring the body is the caller's job: the
+// snippet must not consume bytes the downstream error path still needs.
+//
+// It covers two failure classes that used to be invisible in the journal:
+//
+//   - 400s, which upstream models deliberately reuse as retryable through
+//     doUpstreamCounted (stale reasoning references).
+//   - 401/403 on the anonymous and key lanes. Those paths log at Debug, and the
+//     journal runs at Info, so a revoked key (401) or an upstream abuse gate
+//     (403 "Detect Abuse Traffic") reached the journal as a status code with no
+//     body at all — see the 2026-10-18 incident. Snippet length is capped and
+//     secrets are scrubbed, so logging every 4xx class is safe.
+func (g *Gateway) logUpstreamErrorBody(_ context.Context, route models.Route, ids identity.RequestIDs, status int, body []byte) {
+	if len(body) == 0 {
+		return
+	}
+	redactor := config.NewSecretRedactor()
+	redactor.Replace(g.cfg)
+	snippet := redactor.String(string(body))
+	const maxSnippet = 240
+	if len(snippet) > maxSnippet {
+		snippet = snippet[:maxSnippet]
+	}
+	g.logger.Info("upstream error returned or retried", "component", "upstream", "event", "upstream_error_body", "request_id", ids.Request, "model", route.ID, "status", status, "snippet", snippet)
+}
+
+// readAndRestoreErrorBody drains a bounded error body and puts it back so the
+// caller can still hand the original bytes downstream (or drain the connection
+// and reuse it). Reading is capped so a hostile or broken upstream cannot make
+// the gateway buffer an unbounded error payload.
+func readAndRestoreErrorBody(resp *http.Response) []byte {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	if resp.Body != nil {
+		httpx.DrainAndClose(resp.Body)
+	}
+	if err != nil {
+		return body
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return body
+}
+
+// maxErrorBodyBytes caps how much of an upstream error payload the gateway
+// buffers for logging and downstream copy.
+const maxErrorBodyBytes = 1 << 20
+
 // DebugKeyOverride pins one inference request to a single configured upstream
 // key so the Playground can exercise that key in isolation.
 type DebugKeyOverride struct {
@@ -88,15 +138,7 @@ func (g *Gateway) doUpstreamCounted(ctx context.Context, route models.Route, bod
 	// Log a capped snippet of the upstream error body so the 400 class is
 	// visible without dumping full payloads. Bodies stay out of attempt
 	// records; the hub redactor scrubs configured secrets from log output.
-	if len(errBody) > 0 {
-		redactor := config.NewSecretRedactor()
-		redactor.Replace(g.cfg)
-		snippet := redactor.String(string(errBody))
-		if len(snippet) > 240 {
-			snippet = snippet[:240]
-		}
-		g.logger.Info("upstream error returned or retried", "component", "upstream", "event", "upstream_error_body", "request_id", ids.Request, "model", route.ID, "status", resp.StatusCode, "snippet", snippet)
-	}
+	g.logUpstreamErrorBody(ctx, route, ids, resp.StatusCode, errBody)
 	if !isStaleReasoningReference(errBody) {
 		return resp, effectiveRoute, attempts, nil
 	}
@@ -373,6 +415,11 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 					break
 				}
 			} else {
+				// The 4xx class is only visible if the body is captured here:
+				// Debug logs never reach the journal at Info level, and this
+				// response is drained before the next lane tries.
+				snippet := readAndRestoreErrorBody(resp)
+				g.logUpstreamErrorBody(ctx, route, ids, resp.StatusCode, snippet)
 				g.logger.Debug("anonymous upstream returned an error response; trying the next upstream or proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 			}
 			if index+1 < len(upstreams) && !node.proxy.healthy.Load() {
