@@ -81,6 +81,21 @@ no credential bill as `anonymous`. Usage is still tracked per request
   box, so the proxy tries legacy `/zen/v1` first and falls back to
   `/inference`. A 403 naming tools on one lane is a shaping problem, not a
   quota problem — check which lane the leg used before blaming the bucket.
+- **2026-10-18: `403 OpenCode Free Model Gateway Detect Abuse Traffic`** is a
+  THIRD, separate 403 class — a rate/abuse gate, neither shaping nor quota.
+  Distinguish all four by body and by scope:
+  - `FreeTierError: free tier can only be used from within OpenCode` → request
+    shape is wrong (session id, UA, tools, project id). The gate sections above.
+  - `Detect Abuse Traffic` → the egress IP is being rate-limited. Observed
+    twice (18:44:59 and 18:46:44 IST), lasting ~2 minutes, hitting BOTH
+    anonymous lanes AND every key lane at the same moment — so it is IP-scoped,
+    not credential- or model-scoped. It cleared on its own with no change.
+  - `401 This API key has expired` → the credential was revoked upstream (the
+    2026-10-18 13:54-15:00 wave killed all 6 keys simultaneously). Replace the
+    zen keys in `config.json`; do NOT change request shape and do NOT blame
+    the IP.
+  - `429` with `Retry-After` → the only genuine bucket signal, and the only one
+    of these four with quota semantics.
 
 ## What this means for the proxy (all keys are free, no paid tier)
 
