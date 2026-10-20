@@ -139,7 +139,8 @@ Restart=on-failure
 - `anonymous: true` — free models route through Zen's anonymous channel (no upstream key needed)
 - `listen: "127.0.0.1:8787"` — localhost only
 - `prefer: "zen"`, 6 zen keys, 0 go keys
-- `retry.max_attempts: 6`, `attempt_timeout_seconds: 15`, `first_event_timeout_seconds: 90`
+- `retry.max_attempts: 6`, `retry.timeout_seconds: 900` (raised from 300 on 2026-10-20), `retry.stream_timeout_seconds: 1800` (new 2026-10-20: bounds the STREAM phase only, so a long thinking turn is not killed at the request budget)
+- `performance.attempt_timeout_seconds: 15` (bounds dial+write+headers+first-event per attempt), `performance.first_event_timeout_seconds: 90`
 - `models.refresh_seconds: 300` — catalog refresh every 5 min
 - `webui.enabled: true` (`127.0.0.1:8081`)
 
