@@ -80,6 +80,23 @@ type RetryConfig struct {
 	// 0 keeps the historical behavior: the request-level timeout also bounds
 	// the stream.
 	StreamTimeoutSeconds int `json:"stream_timeout_seconds,omitempty"`
+	// StreamIdleTimeoutSeconds bounds the SILENCE inside an established
+	// stream: how long the upstream may produce no bytes at all before the
+	// stream is abandoned.
+	//
+	// It exists because the gateway's own heartbeat (": keepalive" SSE
+	// comments) does not protect a client that parses SSE strictly: jcode's
+	// openai-compat path skips comment-only events, so a heartbeat never
+	// resets that client's idle timer and a silent thinking turn looks like a
+	// dead connection to it. This limit is what distinguishes "the upstream is
+	// thinking" from "the upstream is gone": a thinking stream is silent for
+	// seconds, a dead stream stays silent until the outer budget expires.
+	//
+	// The limit must sit well above the longest observed thinking silence
+	// (8-56s measured on this box) or it will cut a legitimate turn short.
+	//
+	// 0 disables the watchdog.
+	StreamIdleTimeoutSeconds int `json:"stream_idle_timeout_seconds,omitempty"`
 }
 
 type ModelsConfig struct {

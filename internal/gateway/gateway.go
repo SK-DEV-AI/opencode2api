@@ -44,6 +44,10 @@ func attemptDeadline(cfg config.Config) time.Duration {
 // budget when the operator configured a separate stream budget.
 type streamContextKey struct{}
 
+// errStreamIdle marks a stream that the upstream abandoned mid-flight: no
+// bytes for longer than the configured idle limit.
+var errStreamIdle = errors.New("upstream stream idle timeout")
+
 // withStreamContext attaches the stream-phase context to ctx.
 func withStreamContext(ctx, streamCtx context.Context) context.Context {
 	return context.WithValue(ctx, streamContextKey{}, streamCtx)
@@ -260,12 +264,20 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		// request is built with it, so the connection survives past the
 		// request budget; the attempt phase keeps its own bounds
 		// (attempt_timeout_seconds, ResponseHeaderTimeout, connect timeout).
-		streamCtx := requestCtx
-		streamCancel := func() {}
+		streamCtx, streamCancel := context.WithCancelCause(r.Context())
 		if budget := time.Duration(g.cfg.Retry.StreamTimeoutSeconds) * time.Second; budget > 0 {
-			streamCtx, streamCancel = context.WithTimeout(r.Context(), budget)
+			timer := time.AfterFunc(budget, func() { streamCancel(context.DeadlineExceeded) })
+			defer timer.Stop()
 		}
-		defer streamCancel()
+		// Without a stream budget the request-level budget must still bound
+		// the stream. The request context is what the upstream request is
+		// built from in that case, so the request deadline tears the stream
+		// down on its own.
+		if g.cfg.Retry.StreamTimeoutSeconds <= 0 {
+			streamCtx = requestCtx
+			streamCancel = func(error) {}
+		}
+		defer streamCancel(nil)
 		requestCtx = withStreamContext(requestCtx, streamCtx)
 		resp, upstreamRoute, spent, err := g.doUpstreamCounted(requestCtx, route, bodies, ids, 0)
 		if err != nil {
@@ -334,7 +346,45 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
-			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
+			// Dead-stream watchdog. The gateway's own heartbeat (": keepalive"
+			// SSE comments) does not protect a client that parses SSE
+			// strictly: jcode's openai-compat path skips comment-only
+			// events, so a heartbeat never resets that client's idle timer
+			// and a silent thinking turn looks like a dead connection to it.
+			//
+			// The tracker watches for UPSTREAM silence, which is what
+			// separates "the model is thinking" from "the upstream is gone":
+			// a thinking stream is quiet for seconds (8-56s measured on this
+			// box), a dead stream stays quiet until the outer budget expires.
+			// The limit is deliberately generous so a legitimate thinking
+			// turn is never cut short.
+			var streamBody io.Reader
+			var tracker *wire.IdleTracker
+			if limit := time.Duration(g.cfg.Retry.StreamIdleTimeoutSeconds) * time.Second; limit > 0 {
+				tracker = wire.NewIdleTracker(resp.Body)
+				// The tracker must interrupt the blocked READ, so it cancels
+				// the request context the upstream request was built with.
+				// The cause marks the failure as an idle timeout, not a
+				// client cancel.
+				go func(tracker *wire.IdleTracker) {
+					ticker := time.NewTicker(time.Second)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-streamCtx.Done():
+							return
+						case <-ticker.C:
+							if tracker.SilentFor() > limit {
+								streamCancel(errStreamIdle)
+								return
+							}
+						}
+					}
+				}(tracker)
+				streamBody = wire.RenameStreamReader(tracker, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
+			} else {
+				streamBody = wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, legacyAnonymousReadTool, toolAlias)
+			}
 			var usage wire.Usage
 			var usageReported bool
 			// serveOne streams a single upstream attempt downstream on the
