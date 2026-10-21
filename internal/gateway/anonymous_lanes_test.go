@@ -27,14 +27,14 @@ func TestAnonymousUpstreamsCustomOriginNotHijacked(t *testing.T) {
 func TestAnonymousUpstreamsPublicDeploymentPrefersLegacy(t *testing.T) {
 	gw := probeFixture(t, "https://opencode.ai/inference")
 	lanes := gw.anonymousUpstreams()
-	want := []string{models.LegacyZenBase, "https://opencode.ai/inference"}
+	want := []string{models.V1Base, "https://opencode.ai/inference"}
 	if len(lanes) != len(want) || lanes[0] != want[0] || lanes[1] != want[1] {
 		t.Fatalf("public deployment lanes = %v; want %v", lanes, want)
 	}
 
-	same := probeFixture(t, models.LegacyZenBase)
+	same := probeFixture(t, models.V1Base)
 	lanes = same.anonymousUpstreams()
-	if len(lanes) != 1 || lanes[0] != models.LegacyZenBase {
+	if len(lanes) != 1 || lanes[0] != models.V1Base {
 		t.Fatalf("legacy-only configuration = %v; want a single legacy lane", lanes)
 	}
 }

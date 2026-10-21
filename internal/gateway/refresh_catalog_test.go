@@ -29,7 +29,7 @@ import (
 // ReplaceWithCapabilities already skips nil arguments, so the fix is to pass
 // nil and keep the last good snapshot.
 func TestApplyModelRefreshKeepsProtocolsWhenCapabilityFetchFails(t *testing.T) {
-	catalog := modelcatalog.NewCatalog(config.TierZen, nil)
+	catalog := modelcatalog.Catalog(config.TierZen, nil)
 	gw := &Gateway{
 		catalog: catalog,
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -70,7 +70,7 @@ func TestApplyModelRefreshKeepsProtocolsWhenCapabilityFetchFails(t *testing.T) {
 // A model list that genuinely drops a model must still shrink the catalog: the
 // fix must not freeze the catalog against real removals.
 func TestApplyModelRefreshStillAppliesModelRemovals(t *testing.T) {
-	catalog := modelcatalog.NewCatalog(config.TierZen, nil)
+	catalog := modelcatalog.Catalog(config.TierZen, nil)
 	gw := &Gateway{
 		catalog: catalog,
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -106,7 +106,7 @@ func TestRefreshProtocolCapabilitiesReturnsErrorWhenNoProxy(t *testing.T) {
 		_, _ = io.WriteString(w, `{}`)
 	}))
 	t.Cleanup(server.Close)
-	pool, err := newTransportPool([]string{server.URL}, testPerformanceConfig(), time.Second)
+	pool, err := transportPool([]string{server.URL}, testPerformanceConfig(), time.Second)
 	if err != nil {
 		t.Fatalf("transport pool: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRefreshProtocolCapabilitiesReturnsErrorWhenNoProxy(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	gw := &Gateway{transports: pool, logger: logger, monitor: telemetry.NewMonitor()}
+	gw := &Gateway{transports: pool, logger: logger, monitor: telemetry.Monitor()}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

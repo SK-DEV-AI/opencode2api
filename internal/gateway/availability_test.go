@@ -27,7 +27,7 @@ func probeFixture(t *testing.T, zenURL string) *Gateway {
 		Models:     config.ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{"test-offline-free": "chat"}},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	gw, err := New(cfg, logger, telemetry.NewMonitor())
+	gw, err := New(cfg, logger, telemetry.Monitor())
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)
 	}

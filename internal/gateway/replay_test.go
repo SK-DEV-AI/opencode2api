@@ -20,7 +20,7 @@ type replayHit struct {
 }
 
 // replayFixture builds a Gateway backed by scripted upstream hits.
-func replayFixture(t *testing.T, hits []replayHit) (*Gateway, *telemetry.Monitor, *int) {
+func replayFixture(t *testing.T, hits []replayHit) (*Gateway, *telemetry.Metrics, *int) {
 	t.Helper()
 	n := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +55,7 @@ func replayFixture(t *testing.T, hits []replayHit) (*Gateway, *telemetry.Monitor
 		Models:     config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)
@@ -63,7 +63,7 @@ func replayFixture(t *testing.T, hits []replayHit) (*Gateway, *telemetry.Monitor
 	return gw, monitor, &n
 }
 
-func driveInference(t *testing.T, gw *Gateway, monitor *telemetry.Monitor, model string) string {
+func driveInference(t *testing.T, gw *Gateway, monitor *telemetry.Metrics, model string) string {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	body := `{"model":"` + model + `","stream":true,"messages":[{"role":"user","content":"hi"}]}`

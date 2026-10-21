@@ -27,7 +27,7 @@ func TestUnknownModelReturns404ModelNotFound(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer test-key")
 	rec := httptest.NewRecorder()
 
-	telemetry.Middleware(telemetry.NewMonitor(), testLogger(), gw.Handler()).ServeHTTP(rec, req)
+	telemetry.Middleware(telemetry.Monitor(), testLogger(), gw.Handler()).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 for an unknown model (body %q)", rec.Code, rec.Body.String())
@@ -58,7 +58,7 @@ func TestKnownButUnservableModelKeeps400(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer test-key")
 	rec := httptest.NewRecorder()
 
-	telemetry.Middleware(telemetry.NewMonitor(), testLogger(), gw.Handler()).ServeHTTP(rec, req)
+	telemetry.Middleware(telemetry.Monitor(), testLogger(), gw.Handler()).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for a known but unservable model (body %q)", rec.Code, rec.Body.String())
@@ -170,7 +170,7 @@ func gatewayWithCatalog(t *testing.T, models []string) *Gateway {
 		Models:   config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := testLogger()
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)

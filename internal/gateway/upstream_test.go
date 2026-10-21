@@ -16,7 +16,7 @@ func TestNewUpstreamRequestSetsContentLength(t *testing.T) {
 	body := []byte(`{"model":"mimo-v2.5-free","stream":true}`)
 	ids := identity.RequestIDs{Session: "ses_test", Request: "req_test", Project: "proj_test"}
 	for _, protocol := range []wire.Protocol{wire.Chat, wire.Responses, wire.Anthropic} {
-		req, err := newUpstreamRequest(context.Background(), "https://opencode.ai/zen", protocol, body, ids, "test-key")
+		req, err := upstreamRequest(context.Background(), "https://opencode.ai/zen", protocol, body, ids, "test-key")
 		if err != nil {
 			t.Fatalf("protocol %v: %v", protocol, err)
 		}

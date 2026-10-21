@@ -34,15 +34,15 @@ func TestVerifyProxyAfterErrorOutlivesRequestCancel(t *testing.T) {
 		time.Sleep(1 * time.Second)
 	}))
 	t.Cleanup(slow.Close)
-	pool, err := newTransportPool([]string{slow.URL}, testPerformanceConfig(), time.Second)
+	pool, err := transportPool([]string{slow.URL}, testPerformanceConfig(), time.Second)
 	if err != nil {
 		t.Fatalf("transport pool: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	gw := &Gateway{transports: pool, logger: logger, monitor: telemetry.NewMonitor()}
+	gw := &Gateway{transports: pool, logger: logger, monitor: telemetry.Monitor()}
 	proxy := pool.items[0]
 	ctx, cancel := context.WithCancel(context.Background())
-	gw.verifyProxyAfterError(ctx, proxy, 500)
+	gw.verifyProxyAfterError(ctx, proxy, "upstream response", 500)
 	// The check claimed the flag; cancel while it is still in-flight.
 	time.Sleep(100 * time.Millisecond)
 	cancel()

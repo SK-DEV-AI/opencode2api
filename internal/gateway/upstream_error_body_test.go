@@ -148,7 +148,7 @@ func TestAnonymousLaneLogsErrorBody(t *testing.T) {
 			MaxIdleConns: 64, MaxIdleConnsPerHost: 16,
 		},
 	}
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)

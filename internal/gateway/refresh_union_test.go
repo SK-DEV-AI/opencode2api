@@ -64,7 +64,7 @@ func TestRefreshTierUnionsModelListsAcrossKeys(t *testing.T) {
 		Models:   config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := testLogger()
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)
@@ -121,7 +121,7 @@ func TestRefreshTierAllKeysFailReturnsNil(t *testing.T) {
 		Models:   config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := testLogger()
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)

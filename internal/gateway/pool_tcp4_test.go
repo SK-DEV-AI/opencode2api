@@ -17,7 +17,7 @@ import (
 // the pin. These tests fail if a future upstream rewrite, merge, or
 // `git checkout --theirs` drops it again.
 func TestTransportPinsTCP4(t *testing.T) {
-	pool, err := newTransportPool([]string{"direct"}, testPerformanceConfig(), time.Second)
+	pool, err := transportPool([]string{"direct"}, testPerformanceConfig(), time.Second)
 	if err != nil {
 		t.Fatalf("transport pool: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestTransportPinsTCP4(t *testing.T) {
 // The same pin has to survive on pool entries, which upstream builds with
 // their own TLS/ALPN overrides in the same constructor.
 func TestTransportPinsTCP4OnPoolEntries(t *testing.T) {
-	pool, err := newTransportPool([]string{"pool+socks5://127.0.0.1:1080"}, testPerformanceConfig(), time.Second)
+	pool, err := transportPool([]string{"pool+socks5://127.0.0.1:1080"}, testPerformanceConfig(), time.Second)
 	if err != nil {
 		t.Fatalf("transport pool: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestTransportPinsTCP4OnPoolEntries(t *testing.T) {
 // TLS session resumption rides alongside the tcp4 pin; dropping it costs an
 // extra RTT on every reconnect handshake.
 func TestTransportKeepsTLSSessionCache(t *testing.T) {
-	pool, err := newTransportPool([]string{"direct"}, testPerformanceConfig(), time.Second)
+	pool, err := transportPool([]string{"direct"}, testPerformanceConfig(), time.Second)
 	if err != nil {
 		t.Fatalf("transport pool: %v", err)
 	}

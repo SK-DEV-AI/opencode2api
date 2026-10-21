@@ -83,7 +83,7 @@ func TestStreamBudgetLetsLongStreamOutliveRequestBudget(t *testing.T) {
 		Models:   config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := testLogger()
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)
@@ -159,7 +159,7 @@ func TestStreamBudgetAbsentKeepsRequestBudgetBound(t *testing.T) {
 		Models:   config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := testLogger()
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)
@@ -216,7 +216,7 @@ func TestStreamBudgetStillHonorsClientDisconnect(t *testing.T) {
 		Models:   config.ModelsConfig{RefreshSeconds: 300},
 	}
 	logger := testLogger()
-	monitor := telemetry.NewMonitor()
+	monitor := telemetry.Monitor()
 	gw, err := New(cfg, logger, monitor)
 	if err != nil {
 		t.Fatalf("gateway New: %v", err)
